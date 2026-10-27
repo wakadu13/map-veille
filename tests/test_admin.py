@@ -67,7 +67,9 @@ def test_classer_un_article_le_publie(client):
     ident = client.get("/api/admin/articles", params={"statut": "a_trier"}, auth=AUTH).json()["articles"][0]["id"]
     r = client.patch(f"/api/admin/articles/{ident}", json={"zone": "eur", "theme": "dip"}, auth=AUTH)
     assert r.status_code == 200 and r.json()["manuel"] is True
-    public = client.get("/api/articles", params={"zone": "eur", "theme": "dip"}).json()
+    # grouper=false : ce test suit un article précis, pas la vue regroupée par événement
+    public = client.get("/api/articles",
+                        params={"zone": "eur", "theme": "dip", "grouper": "false"}).json()
     assert any(a["id"] == ident for a in public["articles"])
 
 
@@ -124,8 +126,10 @@ def test_migration_v1_sans_verrou_bloquant(tmp_path):
     import base
     chemin = tmp_path / "v1.sqlite"
     cx = sqlite3.connect(chemin)
-    cx.executescript(base.SCHEMA.replace(
-        "    masque      INTEGER NOT NULL DEFAULT 0 CHECK (masque IN (0, 1)),  -- retiré du site par un administrateur\n", ""))
+    # v1 = le schéma actuel privé de tout ce qui parle de « masque » : la colonne, mais aussi
+    # les index qui s'appuient dessus. Filtrer par ligne évite de casser ce test à chaque
+    # fois qu'une ligne du schéma change de libellé.
+    cx.executescript("\n".join(l for l in base.SCHEMA.splitlines() if "masque" not in l))
     cx.execute("PRAGMA user_version = 1")
     cx.commit()
     cx.close()

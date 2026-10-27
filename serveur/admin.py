@@ -182,6 +182,8 @@ def _avec_statistiques(cx, sources: list) -> list:
             "SELECT COUNT(*), COALESCE(SUM(date_pub >= ?), 0) FROM articles WHERE source = ?",
             (limite, s["nom"])).fetchone()
         s.pop("fichier_test", None)
+        s.pop("etag", None)              # détails internes du cache conditionnel
+        s.pop("derniere_modif", None)    # « echecs » et « pause_jusqu_a » restent : ils sont utiles
     return sources
 
 
@@ -249,7 +251,10 @@ _verrou = threading.Lock()
 
 
 def _executer_collecte(hors_ligne: bool):
-    commande = [sys.executable, str(RACINE / "collecteur" / "collect.py"), "--base", str(chemin_base())]
+    # --forcer : une collecte lancée à la main doit interroger tout de suite, sans attendre
+    # la fréquence de rafraîchissement des sources ni la fin d'une mise en pause
+    commande = [sys.executable, str(RACINE / "collecteur" / "collect.py"),
+                "--base", str(chemin_base()), "--forcer"]
     if hors_ligne:
         commande.append("--hors-ligne")
     try:
