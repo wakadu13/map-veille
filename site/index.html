@@ -53,6 +53,21 @@ h1 span{font-weight:500;color:var(--muted);font-size:1.15rem;letter-spacing:.04e
   display:inline-flex;align-items:center;min-height:24px}
 .lien-theme:hover,.lien-theme:focus-visible{color:var(--accent)}
 .reset{font:inherit;font-size:.85rem;font-weight:600;background:none;border:none;color:var(--accent);cursor:pointer;padding:5px 4px;margin-left:auto;text-decoration:underline;text-underline-offset:3px}
+/* récapitulatif quotidien : <details> natif, donc pliable au clavier sans une ligne de JS */
+.recap{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:0 16px}
+.recap[open]{padding-bottom:14px}
+.recap summary{padding:12px 0;cursor:pointer;min-height:24px}
+.recap summary h2{display:inline-flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:0;
+  font-family:var(--display);font-weight:700;font-size:1.05rem;letter-spacing:.02em}
+.recap summary:focus-visible{outline:2px solid var(--new);outline-offset:2px}
+.recap summary .quand{font-family:var(--mono);font-size:.74rem;font-weight:400;color:var(--muted)}
+/* au-delà de deux thèmes, une seule colonne laisserait la moitié de la largeur vide */
+.recap-corps{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:2px 32px}
+.recap h3{font-family:var(--display);font-size:.95rem;letter-spacing:.03em;text-transform:uppercase;
+  color:var(--accent);margin:14px 0 4px}
+.recap p{margin:0;font-size:.92rem;line-height:1.55;max-width:80ch}
+.recap .signature{margin-top:14px;font-family:var(--mono);font-size:.72rem;color:var(--muted);
+  border-top:1px solid var(--line);padding-top:10px;max-width:none}
 .grid{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);gap:16px;align-items:start}
 .mapbox{background:var(--sea);border:1px solid var(--line);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0}
 /* carte à points */
@@ -124,10 +139,14 @@ footer{font-size:.78rem;color:var(--muted);max-width:75ch}
     <button class="chip" data-jours="1" aria-pressed="false">24 h</button>
     <button class="chip" data-jours="7" aria-pressed="false">7 jours</button>
     <button class="chip" data-jours="30" aria-pressed="true">30 jours</button>
+    <span class="lbl" id="lbl-langue">Langue</span>
+    <span id="langues"></span>
   </div>
 
   <div class="bar" id="themes"><span class="lbl">Thèmes</span></div>
   <p class="bandeau" id="bandeau-theme" hidden></p>
+
+  <details class="recap" id="recap" hidden></details>
 
   <div class="grid">
     <section class="mapbox" id="mapbox" aria-label="Carte">
@@ -160,8 +179,9 @@ const PAS=150;
 // la carte à points la remplace (voir bancs/DECISION-phase2.md, § 5)
 let THEMES=[], CARTE=null, fJours=30, limite=PAS, requete=0;
 let fThemes=[];            // thèmes cochés par le visiteur ; vide = tous
+let LANGUES=[], fLangue=null;   // langue choisie ; null = toutes
 let pageTheme=null;        // code du thème si on est sur /theme/<code>
-const CLE_THEMES="map.themes";
+const CLE_THEMES="map.themes", CLE_LANGUE="map.langue";
 let vue="points";          // points | zones | liste
 let carte=null;            // module site/carte.js, importé à la première vue « points »
 const $=s=>document.querySelector(s);
@@ -187,7 +207,7 @@ async function api(chemin, params={}){
 
 // ---------- construction depuis le référentiel ----------
 function construire(ref){
-  THEMES=ref.themes; CARTE=ref.carte;
+  THEMES=ref.themes; CARTE=ref.carte; LANGUES=ref.langues||[];
   THEMES.forEach(t=>{
     const b=document.createElement("button");
     b.className="chip"; b.textContent=t.nom; b.dataset.t=t.code;
@@ -199,6 +219,13 @@ function construire(ref){
     a.title=`Page dédiée au thème « ${t.nom} »`;
     a.onclick=e=>{e.preventDefault();ouvrirPageTheme(t.code)};
     $("#themes").appendChild(a);
+  });
+  const zl=$("#langues");
+  LANGUES.forEach(l=>{
+    const b=document.createElement("button");
+    b.className="chip"; b.textContent=l.nom; b.dataset.lg=l.code;
+    b.title=`N'afficher que les sources en ${l.nom.toLowerCase()}`;
+    zl.appendChild(b);
   });
   const reset=document.createElement("button");
   reset.className="reset"; reset.textContent="Tous les thèmes";
@@ -221,7 +248,7 @@ async function setVue(v){
       carte=await import(`${RACINE}carte.js`);
       await carte.creer($("#carte-points"), CARTE, {surSelection:ouvrirEvenement, racine:RACINE});
     }
-    carte.appliquerFiltres({themes:paramThemes(), jours:fJours});
+    carte.appliquerFiltres({themes:paramThemes(), jours:fJours, langue:fLangue});
     carte.invalider();     // le conteneur était caché : Leaflet doit remesurer
   }catch(e){
     $("#carte-etat").textContent="La carte n'a pas pu être chargée ; la liste reste disponible.";
@@ -265,6 +292,20 @@ function lirePageTheme(){
   return m ? m[1] : null;
 }
 
+// ---------- langue ----------
+// null = toutes. Un événement relayé en français et en anglais reste visible dans les deux.
+function setLangue(code){
+  fLangue=code;
+  ecrireMemoire(CLE_LANGUE, code);
+  marquerLangue();
+  if(carte)carte.appliquerFiltres({langue:code});
+  actualiser();
+}
+function marquerLangue(){
+  document.querySelectorAll("#langues .chip").forEach(b=>
+    b.setAttribute("aria-pressed", b.dataset.lg===fLangue));
+}
+
 function setJours(j){
   fJours=j;
   document.querySelectorAll("#vues .chip[data-jours]").forEach(b=>b.setAttribute("aria-pressed",+b.dataset.jours===j));
@@ -293,9 +334,38 @@ document.addEventListener("click",e=>{
   if(e.target.id==="fermer-panneau")fermerPanneau();
   if(e.target.dataset?.vue)setVue(e.target.dataset.vue);
   if(e.target.dataset?.jours)setJours(+e.target.dataset.jours);
+  if(e.target.dataset?.lg)setLangue(e.target.dataset.lg===fLangue?null:e.target.dataset.lg);
   if(e.target.classList?.contains("lien-evenement"))ouvrirEvenement(+e.target.dataset.evt);
 });
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("#panneau").hidden)fermerPanneau()});
+
+// ---------- récapitulatif quotidien ----------
+// Écrit par un modèle de langage à la collecte, lu tel quel ici : afficher la page
+// n'appelle aucun service extérieur. Absent par défaut — le bloc reste alors invisible.
+// « jour: null » veut dire qu'il n'y en a aucun en base, ce qui est le cas par défaut :
+// inutile de redemander à chaque rafraîchissement. La prochaine collecte remet le compteur
+// à zéro, puisqu'elle peut justement en avoir écrit.
+let recapAbsent=false;
+function dessinerRecap(d){
+  const bloc=$("#recap"), rs=(d&&d.recaps)||[];
+  if(d && d.jour===null)recapAbsent=true;
+  if(!rs.length){ bloc.hidden=true; bloc.innerHTML=""; return }
+  const ouvert=lireMemoire("map.recap", true);
+  const total=rs.reduce((n,r)=>n+r.nb_articles,0);
+  bloc.hidden=false; bloc.open=!!ouvert;
+  // le titre est un vrai h2 : sans lui, les h3 des thèmes sauteraient un niveau après le h1
+  bloc.innerHTML=`<summary><h2>Récapitulatif du jour<span class="quand">${esc(fmtJour(d.jour))}
+      · ${rs.length} thème${rs.length>1?"s":""} · ${total} article${total>1?"s":""}</span></h2></summary>`
+    + `<div class="recap-corps">`
+    + rs.map(r=>`<div><h3>${esc(r.nom)}</h3><p>${esc(r.texte)}</p></div>`).join("")
+    + `</div><p class="signature">Texte écrit par un modèle de langage (${esc(rs[0].modele)}) à partir
+       des seuls titres parus ce jour-là. Il peut se tromper : les articles d'origine font foi.</p>`;
+}
+const fmtJour=j=>{ const d=new Date(j+"T12:00:00Z");
+  return isNaN(d)?j:d.toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long"}) };
+document.addEventListener("toggle",e=>{
+  if(e.target.id==="recap")ecrireMemoire("map.recap", e.target.open);
+}, true);
 
 // ---------- affichage ----------
 function dessinerEnTete(syn){
@@ -329,7 +399,8 @@ function dessinerFil(res){
 async function afficherPlus(){
   const b=$("#plus"); if(b){b.disabled=true;b.textContent="Chargement…"}
   try{
-    const res=await api("articles",{themes:paramThemes(),jours:fJours,limite:PAS,decalage:affiches});
+    const res=await api("articles",{themes:paramThemes(),langue:fLangue,jours:fJours,
+                                    limite:PAS,decalage:affiches});
     affiches+=res.articles.length;
     $(".more")?.remove();
     $("#list").insertAdjacentHTML("beforeend",res.articles.map(ligne).join("")+bouton());
@@ -345,10 +416,14 @@ async function actualiser(){
   const n=++requete;
   $("#list").setAttribute("aria-busy","true");
   try{
-    const [syn,res]=await Promise.all([api("synthese",{themes:paramThemes(),jours:fJours}),
-                                      api("articles",{themes:paramThemes(),jours:fJours,limite:PAS})]);
+    const [syn,res,rec]=await Promise.all([
+      api("synthese",{themes:paramThemes(),langue:fLangue,jours:fJours}),
+      api("articles",{themes:paramThemes(),langue:fLangue,jours:fJours,limite:PAS}),
+      // le récapitulatif ne doit pas faire échouer la page s'il manque
+      recapAbsent?null:api("recap",{themes:paramThemes()}).catch(()=>null)]);
     if(n!==requete)return;          // une requête plus récente a été lancée entre-temps
     dessinerEnTete(syn); dessinerFil(res);
+    if(rec!==null)dessinerRecap(rec);
   }catch(e){ if(n===requete)erreur(e) }
   finally{ $("#list").removeAttribute("aria-busy") }
 }
@@ -367,6 +442,7 @@ function suivreEnDirect(){
   flux.addEventListener("bonjour", ()=>{ vivant = true; clearInterval(replDirect); replDirect = null });
   flux.addEventListener("collecte", async e=>{
     let d={}; try{ d = JSON.parse(e.data) }catch{}
+    recapAbsent=false;   // la collecte vient peut-être d'écrire le récapitulatif du jour
     $("#maj").textContent = d.mise_a_jour ? fmtH(d.mise_a_jour) : $("#maj").textContent;
     await actualiser();
     if(carte)carte.rafraichir();
@@ -386,9 +462,12 @@ function replierSurInterrogation(){
   pageTheme = lirePageTheme();
   fThemes = lireMemoire(CLE_THEMES, []);
   fJours = lireMemoire("map.jours", 30);
+  fLangue = lireMemoire(CLE_LANGUE, null);
   try{ construire(await api("referentiel")); }catch(e){ erreur(e); return; }
   fThemes = fThemes.filter(c=>THEMES.some(t=>t.code===c));   // un thème peut avoir disparu
   marquerThemes();
+  if(!LANGUES.some(l=>l.code===fLangue))fLangue=null;   // langue retirée de la configuration
+  marquerLangue();
   document.querySelectorAll("#vues .chip[data-jours]").forEach(b=>b.setAttribute("aria-pressed",+b.dataset.jours===fJours));
   await actualiser();
   setVue("points");

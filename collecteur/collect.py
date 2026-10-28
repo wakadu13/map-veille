@@ -43,11 +43,13 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 
 import feedparser
 
 import base    # stockage SQLite (collecteur/base.py)
+import ia      # classement des thèmes par un modèle de langage (collecteur/ia.py)
 import lieux   # extraction des lieux et géocodage (collecteur/lieux.py)
 
 RACINE = Path(__file__).resolve().parent.parent
@@ -156,14 +158,39 @@ def _balayer(texte: str, tables: dict, poids: int, scores: dict, premiere: dict,
                 premiere[cat] = pos
 
 
-def classer(titre: str, resume: str, tables: dict):
-    """Catégorie qui a le plus de points (titre x3, résumé x1), ou None."""
+def classer_scores(titre: str, resume: str, tables: dict) -> tuple:
+    """Points par catégorie (titre x3, résumé x1) et position du premier mot-clé de chacune."""
     scores, premiere = {}, {}
     _balayer(normaliser(titre), tables, POIDS_TITRE, scores, premiere, True)
     _balayer(normaliser(resume), tables, POIDS_RESUME, scores, premiere, False)
+    return scores, premiere
+
+
+def meilleur(scores: dict, premiere: dict):
+    """Catégorie qui a le plus de points, le mot-clé le plus tôt dans le titre départageant."""
     if not scores:
         return None
     return sorted(scores, key=lambda c: (-scores[c], premiere.get(c, 10**6)))[0]
+
+
+def classer(titre: str, resume: str, tables: dict):
+    """Catégorie qui a le plus de points (titre x3, résumé x1), ou None."""
+    return meilleur(*classer_scores(titre, resume, tables))
+
+
+# Écart en deçà duquel deux thèmes sont considérés à égalité : un seul mot-clé de résumé
+# les sépare, ce qui ne suffit pas à trancher. C'est le cas que le modèle de langage sait
+# mieux traiter que des mots-clés — « Nouvelle frégate pour la marine indonésienne » touche
+# « def » et « eco » presque autant l'un que l'autre.
+MARGE_HESITATION = POIDS_RESUME
+
+
+def theme_hesitant(scores: dict) -> bool:
+    """Vrai quand les mots-clés n'ont rien trouvé, ou quand les deux premiers se tiennent."""
+    if not scores:
+        return True
+    points = sorted(scores.values(), reverse=True)
+    return len(points) > 1 and points[0] - points[1] <= MARGE_HESITATION
 
 
 # ======================================================================
@@ -183,6 +210,19 @@ class AdresseRefusee(ValueError):
 # interne du serveur (SSRF). On vérifie le schéma, puis les adresses IP réellement
 # résolues — et de nouveau après chaque redirection, qu'un serveur distant contrôle.
 AUTORISER_RESEAU_LOCAL = os.environ.get("MAP_AUTORISER_RESEAU_LOCAL") == "1"
+
+# Cas particulier d'une machine qui sort par un proxy HTTP : elle n'ouvre pas la connexion
+# elle-même, elle la demande au proxy, et c'est LE PROXY qui résout le nom. Elle n'a alors
+# souvent aucun DNS, et « adresses_de() » échoue pour tous les flux — la collecte s'arrête
+# avant d'avoir commencé. L'adresse que nous résoudrions ne serait de toute façon pas celle
+# qui est jointe.
+#
+# Ce réglage reste donc FERMÉ par défaut : on préfère une collecte qui échoue visiblement à
+# un contrôle qu'on retire sans le dire. L'ouvrir est une décision d'exploitation, à prendre
+# en connaissance de cause : la politique de sortie devient celle du proxy, à qui il revient
+# de refuser le réseau interne. Les contrôles de forme, eux, s'appliquent dans tous les cas
+# — « http://169.254.169.254/… » et « http://10.0.0.1/… » sont refusés avant le proxy.
+PROXY_RESOUT_LES_NOMS = os.environ.get("MAP_PROXY_RESOUT_LES_NOMS") == "1"
 
 
 def adresses_de(hote: str) -> set:
@@ -219,6 +259,21 @@ def verifier_forme_url(url: str, autoriser_local: bool = None):
                              "Un flux doit être servi par une machine publique.")
 
 
+def via_proxy(url: str) -> bool:
+    """Vrai si cette requête-ci passera par un proxy HTTP, qui résoudra le nom à sa place.
+
+    Un hôte listé dans no_proxy est joint en direct : le contrôle par adresse IP s'applique
+    alors normalement, ce qui est ce qu'on veut pour 127.0.0.1 et le réseau de la machine.
+    """
+    d = urllib.parse.urlsplit(url or "")
+    if d.scheme not in urllib.request.getproxies():
+        return False
+    try:
+        return not urllib.request.proxy_bypass(d.hostname or "")
+    except Exception:
+        return True
+
+
 def verifier_url(url: str, autoriser_local: bool = None):
     """Contrôle complet, appliqué juste avant d'ouvrir la connexion : la forme, puis les
     adresses IP réellement résolues. C'est ici que la vérification compte, car un nom peut
@@ -228,6 +283,8 @@ def verifier_url(url: str, autoriser_local: bool = None):
     verifier_forme_url(url, autoriser_local)
     if autoriser_local:
         return
+    if PROXY_RESOUT_LES_NOMS and via_proxy(url):
+        return      # contrôle délégué au proxy, sur décision explicite de l'exploitant
     hote = urllib.parse.urlparse(url).hostname
     try:
         adresses = adresses_de(hote)
@@ -361,9 +418,35 @@ def article(titre, lien, date, source, resume="", zone=None, theme=None, indice_
 # ======================================================================
 # Connecteurs
 # ======================================================================
+# Marqueurs du début d'un document de flux. On ne cherche que dans les premiers octets :
+# au-delà, ce n'est plus du bruit en tête, c'est un autre document.
+DEBUTS_FLUX = (b"<?xml", b"<rss", b"<feed", b"<rdf:RDF")
+BRUIT_MAX = 4096
+
+
+def retirer_le_bruit_en_tete(contenu: bytes) -> bytes:
+    """Coupe ce qui précède le début du document XML, quand il y a quelque chose devant.
+
+    Des sites mal configurés font précéder leur flux d'un avertissement PHP ou d'une ligne
+    blanche. Le document devient « not well-formed » et feedparser ne rend plus aucune
+    entrée, alors que le flux lui-même est parfaitement lisible deux lignes plus bas.
+    Couper au premier marqueur ne devine rien : on jette du texte qui n'avait rien à faire
+    là. Vu en vrai sur East Pendulum, dont le flux commence par un « Warning: » de PHP.
+    """
+    trouves = [i for i in (contenu.find(m, 0, BRUIT_MAX) for m in DEBUTS_FLUX) if i >= 0]
+    if not trouves or min(trouves) == 0:
+        return contenu      # rien devant : le document commence déjà comme il faut
+    return contenu[min(trouves):]
+
+
 def lire_rss(contenu: bytes, nom: str):
     """Flux RSS 0.9x/1.0/2.0 ou Atom, lu par feedparser (tolère les flux mal formés)."""
     flux = feedparser.parse(contenu)
+    if flux.bozo and not flux.entries:
+        # deuxième chance : le flux est peut-être bon, précédé de bruit
+        propre = retirer_le_bruit_en_tete(contenu)
+        if propre is not contenu and len(propre) != len(contenu):
+            flux = feedparser.parse(propre)
     if flux.bozo and not flux.entries:
         raise ValueError(f"flux illisible ({flux.bozo_exception})")
     sortie = []
@@ -452,6 +535,140 @@ def source_reliefweb(s, hors_ligne, pays_zone):
 # ======================================================================
 # Programme principal
 # ======================================================================
+# ======================================================================
+# Trouver l'adresse d'un flux
+# ======================================================================
+# Une adresse de flux se devine mal : chaque site a sa convention, et un moteur de recherche
+# ne les indexe pas. Plutôt que de laisser l'utilisateur essayer à la main, on demande au
+# site lui-même. Deux pistes, dans cet ordre :
+#   1. l'annonce officielle — <link rel="alternate" type="application/rss+xml"> dans le
+#      <head> de la page d'accueil. C'est la méthode prévue par la norme, et elle donne
+#      l'adresse exacte quand le site la respecte ;
+#   2. les chemins conventionnels, essayés seulement si l'annonce ne donne rien.
+CHEMINS_FLUX = ("/feed/", "/rss", "/rss.xml", "/feed.xml", "/index.xml", "/atom.xml",
+                "/feeds/all.atom.xml", "/?feed=rss2", "/blog/feed/", "/actualites/feed/",
+                "/news/feed/", "/publications/feed/")
+
+TYPES_FLUX = ("application/rss+xml", "application/atom+xml", "application/xml", "text/xml",
+              "application/json")   # JSON Feed : annoncé, mais feedparser ne le lit pas
+
+
+class _AnnoncesFlux(HTMLParser):
+    """Relève les <link rel="alternate" type="application/rss+xml" href="…"> d'une page."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.trouves = []
+
+    def handle_starttag(self, balise, attributs):
+        if balise != "link":
+            return
+        a = {c.lower(): (v or "") for c, v in attributs}
+        rel = a.get("rel", "").lower().split()
+        if "alternate" in rel and a.get("type", "").lower().split(";")[0].strip() in TYPES_FLUX:
+            if a.get("href"):
+                self.trouves.append((a["href"], a.get("title", "")))
+
+
+def flux_annonces(page: bytes, url_page: str) -> list:
+    """Adresses de flux annoncées par une page HTML, rendues absolues et dédoublonnées."""
+    lecteur = _AnnoncesFlux()
+    try:
+        lecteur.feed(page.decode("utf-8", "replace"))
+    except Exception:
+        return []   # une page cassée ne doit pas faire échouer la découverte
+    vues, sortie = set(), []
+    for href, _titre in lecteur.trouves:
+        absolue = urllib.parse.urljoin(url_page, href.strip())
+        if absolue.split(":")[0].lower() in ("http", "https") and absolue not in vues:
+            vues.add(absolue)
+            sortie.append(absolue)
+    return sortie
+
+
+def pages_a_sonder(url: str) -> list:
+    """Pages HTML où chercher une annonce : la racine du site, puis le dossier de l'adresse.
+
+    Beaucoup d'adresses fausses sont fausses « de peu » : https://site.org/fr/rss.xml quand
+    le flux est sur https://site.org/fr/feed/. Sonder le dossier en plus de la racine
+    rattrape les sites multilingues, qui annoncent un flux différent par langue.
+    """
+    d = urllib.parse.urlsplit(url)
+    racine = urllib.parse.urlunsplit((d.scheme, d.netloc, "/", "", ""))
+    pages = [racine]
+    dossier = d.path.rsplit("/", 1)[0] + "/"
+    if dossier not in ("/", ""):
+        pages.append(urllib.parse.urlunsplit((d.scheme, d.netloc, dossier, "", "")))
+    return pages
+
+
+def chemins_candidats(url: str) -> list:
+    """Adresses conventionnelles à essayer, à la racine du site puis sous son premier dossier."""
+    d = urllib.parse.urlsplit(url)
+    prefixes = [""]
+    premier = d.path.strip("/").split("/")[0] if d.path.strip("/") else ""
+    if premier and "." not in premier:      # /fr, /en, /blog… mais pas /rss.xml
+        prefixes.append("/" + premier)
+    vues, sortie = {url}, []
+    for prefixe in prefixes:
+        for chemin in CHEMINS_FLUX:
+            candidate = urllib.parse.urlunsplit((d.scheme, d.netloc, prefixe + chemin, "", ""))
+            if "?" in chemin:               # /?feed=rss2 : la query ne passe pas par le path
+                chemin_nu, _, requete = chemin.partition("?")
+                candidate = urllib.parse.urlunsplit(
+                    (d.scheme, d.netloc, prefixe + chemin_nu, requete, ""))
+            if candidate not in vues:
+                vues.add(candidate)
+                sortie.append(candidate)
+    return sortie
+
+
+def essayer_flux(url: str, lire=None) -> int:
+    """Nombre d'articles exploitables à cette adresse, ou -1 si ce n'en est pas un."""
+    lire = lire or (lambda u: http(u, accept="application/rss+xml, application/xml, text/xml, */*"))
+    try:
+        lot = lire_rss(lire(url), "essai")
+    except Exception:
+        return -1
+    return sum(1 for a in lot if a["titre"] and a["lien"].startswith("http"))
+
+
+def decouvrir_flux(url: str, lire=None, journal=None) -> dict:
+    """Cherche l'adresse du flux d'un site à partir d'une adresse qui ne répond pas.
+
+    Renvoie {"url", "articles", "annonce"} pour la première adresse qui rend des articles,
+    ou None. `journal` reçoit chaque essai (adresse, résultat) pour l'affichage.
+    """
+    # un seul Accept pour les deux usages : la page d'accueil et les flux candidats. Le
+    # serveur choisit de toute façon d'après l'adresse demandée.
+    lire = lire or (lambda u: http(u, accept="text/html, application/xhtml+xml, "
+                                             "application/rss+xml, application/atom+xml, "
+                                             "application/xml;q=0.9, */*;q=0.8"))
+    # Si le nom de machine n'existe pas, aucune des vingt-six adresses candidates n'existera
+    # non plus : autant le dire tout de suite plutôt que de les essayer une par une.
+    try:
+        verifier_url(url)
+    except AdresseRefusee as e:
+        if journal is not None:
+            journal.append((url, str(e)))
+        return None
+    annoncees = []
+    for page in pages_a_sonder(url):
+        try:
+            annoncees += [u for u in flux_annonces(lire(page), page) if u not in annoncees]
+        except Exception as e:
+            if journal is not None:
+                journal.append((page, f"page illisible ({type(e).__name__})"))
+    annoncees = [u for u in annoncees if u != url]
+    for candidate in annoncees + [c for c in chemins_candidats(url) if c not in annoncees]:
+        n = essayer_flux(candidate, lire)
+        if journal is not None:
+            journal.append((candidate, f"{n} articles" if n >= 0 else "pas un flux"))
+        if n > 0:
+            return {"url": candidate, "articles": n, "annonce": candidate in annoncees}
+    return None
+
+
 def referentiels() -> dict:
     """Règles de tri et correspondances pays -> zone, chargées une fois par collecte.
     Les mots-clés des thèmes viennent de config/themes.json ; ceux des zones de regles.json."""
@@ -479,8 +696,33 @@ def collecter_source(s: dict, hors_ligne: bool, ref: dict, entetes: dict = None)
 def trier(a: dict, ref: dict) -> dict:
     """Étape 3 : zone et thème (ceux fournis par l'API d'abord, puis les mots-clés)."""
     a["zone"] = a["zone"] or classer(a["titre"], a["resume"], ref["zones"])
-    a["theme"] = a["theme"] or classer(a["titre"], a["resume"], ref["themes"]) or a["indice_theme"]
+    if not a["theme"]:
+        scores, premiere = classer_scores(a["titre"], a["resume"], ref["themes"])
+        a["theme"] = meilleur(scores, premiere) or a["indice_theme"]
+        a["scores_theme"] = scores   # gardé pour savoir si le tri a hésité (voir ia.py)
     return a
+
+
+def completer_theme(cx, a: dict, classificateur, quand: str, rubriques: dict,
+                    maintenant: datetime) -> bool:
+    """Demande son thème au modèle de langage quand les mots-clés n'ont pas tranché.
+
+    Renvoie vrai si le modèle a changé quelque chose. Un thème imposé par la source n'est
+    jamais remis en cause : le flux sait mieux que quiconque ce qu'il publie.
+    """
+    if not classificateur or a.get("theme_force"):
+        return False
+    avant = a.get("theme")
+    if quand == "manquant" and avant:
+        return False
+    if quand == "doute" and avant and not theme_hesitant(a.get("scores_theme")):
+        return False
+    theme = ia.classer_avec_cache(cx, a["titre"], normaliser(a["titre"]), a["resume"],
+                                  rubriques, classificateur, maintenant)
+    if not theme or theme == avant:
+        return False
+    a["theme"], a["theme_ia"] = theme, True
+    return True
 
 
 def zone_du_lieu(a: dict, trouve: dict, ref: dict):
@@ -586,6 +828,7 @@ def collecter_toutes(cx, collecte: int, ref: dict, hors_ligne: bool, parallele: 
                 if s.get("theme_impose"):        # flux thématique : le thème ne se devine pas
                     for a in lot:
                         a["theme"] = a["theme"] or s["theme_impose"]
+                        a["theme_force"] = True
                 for a in lot:
                     a["langue"] = s.get("langue", "fr")
                 bruts += lot
@@ -618,6 +861,8 @@ def main(argv=None):
     ap.add_argument("--forcer", action="store_true",
                     help="interroge toutes les sources actives sans tenir compte de leur "
                          "fréquence de rafraîchissement ni du disjoncteur")
+    ap.add_argument("--sans-ia", action="store_true",
+                    help="ne pas appeler le modèle de langage, même si config/ia.json est actif")
     ap.add_argument("--parallele", type=int, default=PARALLELE, metavar="N",
                     help=f"sources interrogées en même temps (défaut : {PARALLELE}, "
                          "une seule à la fois par domaine)")
@@ -653,16 +898,36 @@ def main(argv=None):
     compte = {"nouveau": 0, "regroupe": 0, "maj": 0, "inchange": 0, "ancien": 0}
     gaz = lieux.charger_gazetteer()
     geocodeur = lieux.charger_geocodeur()
-    situes = 0
+    classificateur = None if args.sans_ia else ia.charger_classificateur()
+    quand = ia.quand_demander() if classificateur else "doute"
+    rubriques = ia.rubriques(base.THEMES_DECLARES) if classificateur else {}
+    if classificateur:
+        print(f"Classement par IA : {classificateur.modele}, au plus "
+              f"{classificateur.budget} appels, déclenché « {quand} ».")
+    situes = par_ia = 0
     for a in bruts:
         if not a["titre"] or not a["lien"].startswith("http"):
             continue
         trier(a, ref)
+        par_ia += completer_theme(cx, a, classificateur, quand, rubriques, MAINTENANT)
         situer(a, gaz, cx, geocodeur, ref)
         situes += a.get("lat") is not None
         compte[base.enregistrer(cx, a, normaliser(a["titre"]), MAINTENANT, collecte)] += 1
     base.fin_collecte(cx, collecte, base.maintenant_utc(), len(bruts), compte["nouveau"],
                       compte["regroupe"])
+
+    # Récapitulatif du jour : un appel par thème, une fois toutes les quelques heures.
+    # Il est écrit ici et non à l'affichage : une page qui s'ouvre ne doit jamais déclencher
+    # un appel à un service extérieur.
+    recap = ia.reglages_recap() if classificateur else {"actif": False}
+    if classificateur and recap["actif"]:
+        bilans = ia.recaps_du_jour(cx, base.jour_utc(MAINTENANT),
+                                   ia.rubriques(base.THEMES_DECLARES), classificateur,
+                                   MAINTENANT, recap)
+        cx.commit()
+        ecrits = [b["theme"] for b in bilans if b["etat"] == "ecrit"]
+        if ecrits:
+            print(f"Récap : {len(ecrits)} thèmes résumés ({', '.join(ecrits)}).")
 
     publies = cx.execute("SELECT COUNT(*) FROM fil WHERE date_pub >= ?",
                          ((MAINTENANT - base.DUREE_FIL).isoformat(),)).fetchone()[0]
@@ -674,6 +939,14 @@ def main(argv=None):
           f"à un événement déjà connu, {compte['ancien']} trop anciens ignorés.")
     print(f"Événements : {evenements} au total "
           f"(un événement = un point sur la carte, avec toutes ses sources).")
+    if classificateur and classificateur.appels:
+        reste = "budget épuisé" if classificateur.budget <= 0 else f"{classificateur.budget} restants"
+        print(f"IA   : {classificateur.appels} appels ({reste}), {par_ia} thèmes corrigés, "
+              f"{classificateur.echecs} échecs.")
+        if classificateur.derniere_erreur:
+            print(f"       dernière erreur : {classificateur.derniere_erreur}")
+    elif classificateur:
+        print("IA   : aucun appel — les mots-clés ont suffi, ou tout était déjà en cache.")
     if bruts:
         print(f"Carte : {situes} articles sur {len(bruts)} placés "
               f"({100 * situes / len(bruts):.0f} %) ; les autres restent dans la liste.")

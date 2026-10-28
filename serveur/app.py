@@ -115,6 +115,15 @@ def verifier(zone: Optional[str], theme: Optional[str]):
                                  f"Codes valides : {', '.join(base.THEMES_ACTIFS)}")
 
 
+def verifier_langue(langue: Optional[str]) -> Optional[str]:
+    if langue in (None, "", "toutes"):
+        return None
+    if langue not in base.LANGUES:
+        raise HTTPException(422, f"Langue inconnue : {langue}. "
+                                 f"Codes valides : {', '.join(base.LANGUES)}")
+    return langue
+
+
 def themes_demandes(theme: Optional[str], themes: Optional[str]) -> list:
     """Codes de thèmes retenus pour une requête.
 
@@ -189,6 +198,7 @@ def referentiel(requete: Request, cx: sqlite3.Connection = Depends(connexion)):
         carte_conf = json.loads(base.CARTE_JSON.read_text(encoding="utf-8"))
         corps, etag = serialiser({
             "zones": zones, "themes": themes,
+            "langues": [{"code": c, "nom": base.NOMS_LANGUES.get(c, c)} for c in base.LANGUES],
             "duree_nouveau_heures": int(base.DUREE_NOUVEAU.total_seconds() // 3600),
             "carte": {k: v for k, v in carte_conf.items() if not k.startswith("_")}})
         _referentiel = (corps, gzip.compress(corps, 6), etag)
@@ -198,7 +208,7 @@ def referentiel(requete: Request, cx: sqlite3.Connection = Depends(connexion)):
 
 @app.get("/api/synthese", summary="Nombre d'articles et de nouveautés par zone (coloration de la carte)")
 def synthese(requete: Request, theme: Optional[str] = None, themes: Optional[str] = None,
-             jours: int = Query(30, ge=1, le=365),
+             langue: Optional[str] = None, jours: int = Query(30, ge=1, le=365),
              zones: bool = Query(False, description="ajouter les comptages par zone"),
              cx: sqlite3.Connection = Depends(connexion)):
     """Date de la dernière collecte, sources actives, et comptages.
@@ -210,6 +220,8 @@ def synthese(requete: Request, theme: Optional[str] = None, themes: Optional[str
     """
     codes = themes_demandes(theme, themes)
     where, params = filtre_sql(None, None, jours, themes=codes)
+    ou_lg, p_lg = base.langue_sql(verifier_langue(langue))
+    where, params = where + ou_lg, [*params, *p_lg]
     seuil_nouveau = (maintenant() - base.DUREE_NOUVEAU).isoformat()
     sortie = {}
     if zones:
@@ -217,9 +229,15 @@ def synthese(requete: Request, theme: Optional[str] = None, themes: Optional[str
             f"""SELECT zone, COUNT(*) AS total, SUM(ajout >= ?) AS nouveaux
                 FROM fil WHERE {where} GROUP BY zone""", [seuil_nouveau, *params]).fetchall()
         par_zone = {code: {"total": 0, "nouveaux": 0} for code in base.ZONES}
+        # Depuis v15, un article à thème imposé est diffusé même sans zone : il ne tombe
+        # dans aucune des six cases, et on le compte à part plutôt que de l'oublier.
+        sans_zone = {"total": 0, "nouveaux": 0}
         for r in lignes:
-            par_zone[r["zone"]] = {"total": r["total"], "nouveaux": r["nouveaux"] or 0}
+            case = par_zone.setdefault(r["zone"], sans_zone) if r["zone"] else sans_zone
+            case["total"] = r["total"]
+            case["nouveaux"] = r["nouveaux"] or 0
         sortie["zones"] = par_zone
+        sortie["sans_zone"] = sans_zone
     derniere = cx.execute("SELECT fin FROM collectes WHERE fin IS NOT NULL AND hors_ligne = 0 "
                           "ORDER BY id DESC LIMIT 1").fetchone()
     comptes = cx.execute(
@@ -235,7 +253,8 @@ def synthese(requete: Request, theme: Optional[str] = None, themes: Optional[str
 
 @app.get("/api/articles", summary="Fil d'actualité filtré, du plus récent au plus ancien")
 def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] = None,
-             themes: Optional[str] = None, jours: int = Query(30, ge=1, le=365),
+             themes: Optional[str] = None, langue: Optional[str] = None,
+             jours: int = Query(30, ge=1, le=365),
              limite: int = Query(150, ge=1, le=500), decalage: int = Query(0, ge=0),
              grouper: bool = Query(True, description="une ligne par événement plutôt que par article"),
              cx: sqlite3.Connection = Depends(connexion)):
@@ -247,10 +266,13 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
     """
     verifier(zone, None)
     codes = themes_demandes(theme, themes)
+    langue = verifier_langue(langue)
     seuil_nouveau = (maintenant() - base.DUREE_NOUVEAU).isoformat()
 
     if not grouper:
         where, params = filtre_sql(zone, None, jours, themes=codes)
+        ou_lg, p_lg = base.langue_sql(langue)
+        where, params = where + ou_lg, [*params, *p_lg]
         total, nouveaux = cx.execute(
             f"SELECT COUNT(*), COALESCE(SUM(ajout >= ?), 0) FROM fil WHERE {where}",
             [seuil_nouveau, *params]).fetchone()
@@ -272,6 +294,8 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
     # par page : 561 ms au 95e centile sur 200 000 articles, plus lent que l'ancien fil non
     # groupé. C'est la forme ci-dessous qui est mesurée dans bancs/bench_api.py.
     ou_evt, p_evt = filtre_sql(zone, None, jours, "e.", "date_fin", themes=codes)
+    ou_lg, p_lg = base.langue_sql(langue, "e.")
+    ou_evt, p_evt = ou_evt + ou_lg, [*p_evt, *p_lg]
     # nb_sources dans la clause WHERE, et pas un filtre après coup : un événement dont
     # toutes les sources ont été masquées ne doit ni compter dans le total, ni occuper une
     # place dans la page — sinon la pagination renverrait des pages trop courtes.
@@ -290,6 +314,9 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
         [*p_evt, limite, decalage]).fetchall()
 
     representants = {}
+    # l'article mis en avant doit être dans la langue demandée, sinon on afficherait
+    # un titre anglais sur une page filtrée en français
+    ou_art, p_art = base.langue_sql(langue)
     if evts:
         trous = ", ".join("?" * len(evts))
         # la fenêtre glissante ne porte que sur les articles de ces événements-là,
@@ -299,8 +326,8 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
                       SELECT evenement_id, id, titre, source, date_pub, lien, ajout >= ? AS nouveau,
                              ROW_NUMBER() OVER (PARTITION BY evenement_id
                                                 ORDER BY date_pub DESC) rn
-                      FROM fil WHERE evenement_id IN ({trous})) WHERE rn = 1""",
-                [seuil_nouveau, *[e["id"] for e in evts]]):
+                      FROM fil WHERE evenement_id IN ({trous}){ou_art}) WHERE rn = 1""",
+                [seuil_nouveau, *[e["id"] for e in evts], *p_art]):
             representants[r["evenement_id"]] = r
 
     sortie = []
@@ -340,7 +367,7 @@ def bbox_sql(bbox: Optional[str], prefixe: str = ""):
 
 @app.get("/api/evenements", summary="Points de la carte : un événement = un point, plusieurs sources")
 def evenements(requete: Request, theme: Optional[str] = None, themes: Optional[str] = None,
-               zone: Optional[str] = None,
+               langue: Optional[str] = None, zone: Optional[str] = None,
                jours: int = Query(30, ge=1, le=365), bbox: Optional[str] = None,
                limite: int = Query(500, ge=1, le=2000),
                cx: sqlite3.Connection = Depends(connexion)):
@@ -353,6 +380,8 @@ def evenements(requete: Request, theme: Optional[str] = None, themes: Optional[s
     verifier(zone, None)
     codes = themes_demandes(theme, themes)
     where, params = filtre_sql(zone, None, jours, "e.", "date_fin", themes=codes)
+    ou_lg, p_lg = base.langue_sql(verifier_langue(langue), "e.")
+    where, params = where + ou_lg, [*params, *p_lg]
     where += " AND e.lat IS NOT NULL"
     sql_bbox, p_bbox = bbox_sql(bbox, "e.")
     where += sql_bbox
@@ -363,7 +392,8 @@ def evenements(requete: Request, theme: Optional[str] = None, themes: Optional[s
     lignes = cx.execute(
         # zone et date_debut ne servent qu'au panneau de détail : inutile de les répéter
         # sur 600 points, le poids de la réponse compte plus que l'exhaustivité ici
-        f"""SELECT e.id, e.titre, e.lieu, e.lat, e.lon, e.theme, e.date_fin, e.nb_sources
+        f"""SELECT e.id, e.titre, e.lieu, e.lat, e.lon, e.theme, e.date_fin, e.nb_sources,
+                   e.langues
             FROM evenements e WHERE {where}
             ORDER BY e.nb_sources DESC, e.date_fin DESC LIMIT ?""", [*params, limite]).fetchall()
     points = [dict(r) for r in lignes]
@@ -442,6 +472,32 @@ async def direct(requete: Request):
         # il tamponnerait le flux et les messages n'arriveraient que par paquets
         "Content-Encoding": "identity",
     })
+
+
+@app.get("/api/recap", summary="Récapitulatif quotidien par thème, écrit par un modèle de langage")
+def recap(requete: Request, jour: Optional[str] = None, theme: Optional[str] = None,
+          themes: Optional[str] = None, cx: sqlite3.Connection = Depends(connexion)):
+    """Les récapitulatifs déjà écrits et rangés en base. Cette route ne calcule rien et
+    n'appelle aucun service extérieur : c'est la collecte qui les écrit.
+
+    Sans `jour`, la journée la plus récente qui en a — en début de matinée, c'est la veille.
+    """
+    codes = themes_demandes(theme, themes)
+    if jour is not None:
+        if len(jour) != 10 or jour[4] != "-" or jour[7] != "-" or not jour.replace("-", "").isdigit():
+            raise HTTPException(422, f"Date attendue au format AAAA-MM-JJ, reçu : {jour}")
+    else:
+        jour = base.dernier_jour_avec_recap(cx, codes)
+    if not jour:
+        return avec_cache({"jour": None, "recaps": []}, CACHE_FIL, requete)
+    noms = {t["code"]: t["nom"] for t in base.THEMES_DECLARES}
+    rang = {t["code"]: i for i, t in enumerate(base.THEMES_DECLARES)}   # ordre d'affichage
+    recaps = [{"theme": r["theme"], "nom": noms.get(r["theme"], r["theme"]),
+               "texte": r["texte"], "nb_articles": r["nb_articles"],
+               "modele": r["modele"], "maj": r["maj"]}
+              for r in sorted(base.lister_recaps(cx, jour, codes),
+                              key=lambda r: rang.get(r["theme"], 10**6))]
+    return avec_cache({"jour": jour, "recaps": recaps}, CACHE_FIL, requete)
 
 
 @app.get("/api/collectes", summary="Journal des dernières collectes et état des sources")

@@ -25,11 +25,135 @@ def ecrire(chemin: Path, cle: str, contenu) -> Path:
 # ---------- les fichiers livrés ----------
 def test_les_fichiers_livres_sont_valides():
     themes = base.charger_themes()
-    assert [t["code"] for t in themes] == ["def", "dip", "eco", "tec", "cli"]
-    assert all(t["mots_cles"] for t in themes)
+    codes = [t["code"] for t in themes]
+    assert len(codes) == len(set(codes)) >= 5
+    assert codes == [t["code"] for t in sorted(themes, key=lambda x: (x["ordre"], x["code"]))]
+    assert all(t["mots_cles"] and t["nom"] for t in themes)
     flux = base.lire_config(base.FLUX_JSON, "flux")
     assert {f["nom"] for f in flux} >= {"Le Monde", "France 24", "RFI", "franceinfo"}
     assert all(f.get("langue") in base.LANGUES for f in flux)
+    assert all(f.get("theme") in (None, *base.THEMES) for f in flux)
+
+
+def test_le_theme_geopolitique_et_ses_flux_sont_livres():
+    """Thème demandé pour la veille stratégique, avec ses sources de think tanks."""
+    assert "geo" in base.THEMES
+    flux = base.lire_config(base.FLUX_JSON, "flux")
+    geo = [f for f in flux if f.get("theme") == "geo"]
+    assert {f["nom"] for f in geo} >= {"IFRI", "IRSEM", "Le Grand Continent",
+                                       "Revue Défense Nationale", "The National Interest"}
+    # ces sources publient quelques fois par semaine : les interroger toutes les heures
+    # n'aurait aucun sens
+    assert all(f["frequence_minutes"] >= 180 for f in geo)
+    assert {f["langue"] for f in geo} == {"fr", "en"}
+
+
+def test_le_theme_cybersecurite_et_ses_flux_sont_livres():
+    assert "cyb" in base.THEMES
+    flux = base.lire_config(base.FLUX_JSON, "flux")
+    cyb = [f for f in flux if f.get("theme") == "cyb"]
+    assert {f["nom"] for f in cyb} >= {"CERT-FR (ANSSI)", "Krebs on Security",
+                                       "BleepingComputer", "The Record"}
+    assert {f["langue"] for f in cyb} == {"fr", "en"}
+
+
+def test_les_mots_cles_cyber_ont_quitte_tec():
+    """Les laisser aux deux endroits ferait gagner « tec » par simple égalité de points."""
+    themes = {t["code"]: t["mots_cles"] for t in base.THEMES_DECLARES}
+    partages = set(themes["tec"]) & set(themes["cyb"])
+    assert not partages, f"mots-clés en double entre tec et cyb : {partages}"
+    assert "cyber*" in themes["cyb"] and "cyber*" not in themes["tec"]
+    assert "espace" in themes["tec"], "tec garde l'espace et les sciences"
+
+
+def test_aucun_mot_cle_n_appartient_a_deux_themes():
+    """Un mot-clé partagé ne départage rien : il donne un point à chacun."""
+    vus, doublons = {}, {}
+    for t in base.THEMES_DECLARES:
+        for mot in t["mots_cles"]:
+            if mot in vus:
+                doublons.setdefault(mot, [vus[mot]]).append(t["code"])
+            vus[mot] = t["code"]
+    assert not doublons, f"mots-clés partagés : {doublons}"
+
+
+def test_aucun_mot_cle_n_est_deja_couvert_par_une_racine_du_meme_theme():
+    """« cyberattaque* » après « cyber* » donne deux points au lieu d'un, pour un seul mot.
+
+    Le tri additionne un point par mot-clé touché : une racine qui couvre déjà un autre
+    mot-clé du même thème gonfle son score sans raison, et fausse les égalités.
+    """
+    couverts = []
+    for t in base.THEMES_DECLARES:
+        mots = [collect.normaliser(m).strip() for m in t["mots_cles"]]
+        racines = [collect.normaliser(m).strip() for m in t["mots_cles"] if m.endswith("*")]
+        couverts += [f"{t['code']}: {m} ⊂ {r}*" for r in racines for m in mots
+                     if m != r and m.startswith(r)]
+    assert not couverts, couverts
+
+
+def test_les_mots_cles_cyb_ne_devorent_pas_les_autres_themes():
+    tables = collect.referentiels()["themes"]
+    for titre, attendu in [
+            ("Rançongiciel : un hôpital de Lyon paralysé", "cyb"),
+            ("Faille de sécurité critique dans OpenSSH", "cyb"),
+            ("Fuite de données chez un opérateur téléphonique", "cyb"),
+            ("Ransomware gang claims attack on a European bank", "cyb"),
+            ("L'ANSSI publie un avis sur une vulnérabilité activement exploitée", "cyb"),
+            # ce qui doit rester ailleurs
+            ("Lancement réussi de la fusée Ariane 6", "tec"),
+            ("Ukraine : frappes de missiles sur Kharkiv", "def"),
+            ("Le président reçoit l'ambassadeur de Chine", "dip"),
+            ("Séisme au Japon, alerte au tsunami", "cli")]:
+        assert collect.classer(titre, "", tables) == attendu, titre
+
+
+def test_les_mots_cles_geo_ne_devorent_pas_les_autres_themes():
+    """« geo » marque le registre d'analyse, pas les faits : un missile reste « def »."""
+    tables = collect.referentiels()["themes"]
+    assert collect.classer("Ukraine : frappes de missiles sur Kharkiv", "", tables) == "def"
+    assert collect.classer("Le président reçoit l'ambassadeur de Chine", "", tables) == "dip"
+    assert collect.classer("Séisme au Japon, alerte au tsunami", "", tables) == "cli"
+    for titre in ("La rivalité systémique entre Washington et Pékin",
+                  "Vers un ordre international multipolaire ?",
+                  "Great power competition in the Indo-Pacific",
+                  "Autonomie stratégique européenne : où en est-on ?"):
+        assert collect.classer(titre, "", tables) == "geo", titre
+
+
+# Les adresses ont été interrogées pour de bon le 28/10/2026. Ces trois tests gardent le
+# résultat de cette vérification : une adresse ajoutée plus tard sans être testée se verra
+# tout de suite, et une source déclarée morte ne doit pas continuer à être interrogée.
+def test_chaque_flux_porte_le_verdict_de_sa_verification():
+    sans_verdict = [f["nom"] for f in base.lire_config(base.FLUX_JSON, "flux")
+                    if f["type"] == "rss"
+                    and "vérifiée le" not in f.get("notes", "")
+                    and "NE RÉPOND PAS" not in f.get("notes", "")]
+    assert not sans_verdict, ("adresses jamais testées : lancer « admin.py verifier-flux "
+                              f"--decouvrir --ecrire » pour {sans_verdict}")
+
+
+def test_une_source_qui_ne_repond_pas_est_coupee():
+    """La laisser active coûterait une requête perdue par collecte, et un disjoncteur."""
+    actives_mortes = [f["nom"] for f in base.lire_config(base.FLUX_JSON, "flux")
+                      if "NE RÉPOND PAS" in f.get("notes", "") and f.get("actif", True)]
+    assert not actives_mortes
+
+
+def test_une_source_coupee_dit_pourquoi():
+    muettes = [f["nom"] for f in base.lire_config(base.FLUX_JSON, "flux")
+               if not f.get("actif", True) and len(f.get("notes", "")) < 40]
+    assert not muettes, f"coupées sans motif écrit : {muettes}"
+
+
+def test_il_reste_assez_de_sources_actives():
+    """Garde-fou grossier : si une mise à jour en coupe la moitié, il faut le voir."""
+    flux = base.lire_config(base.FLUX_JSON, "flux")
+    actives = [f for f in flux if f.get("actif", True)]
+    assert len(actives) >= 40, f"{len(actives)} sources actives sur {len(flux)}"
+    par_theme = {t: sum(1 for f in actives if f.get("theme") == t)
+                 for t in ("def", "geo", "cyb")}
+    assert all(n >= 5 for n in par_theme.values()), par_theme
 
 
 def test_les_themes_ne_sont_plus_codes_en_dur():

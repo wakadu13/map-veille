@@ -35,6 +35,7 @@ ZONES = {
 }
 
 LANGUES = ("fr", "en")   # langues gérées pour le tri et l'extraction de lieux
+NOMS_LANGUES = {"fr": "Français", "en": "Anglais"}
 FREQUENCE_DEFAUT = 60    # minutes entre deux interrogations d'une source
 
 
@@ -85,12 +86,17 @@ THEMES = {t["code"]: t["nom"] for t in THEMES_DECLARES}
 THEMES_ACTIFS = [t["code"] for t in THEMES_DECLARES if t["actif"]]
 REGLES_THEMES = {t["code"]: t["mots_cles"] for t in THEMES_DECLARES}
 
-VERSION_SCHEMA = 10  # v2 : articles.masque ; v3 : table sources ; v4 : collectes.nb_supprimes ;
+VERSION_SCHEMA = 15  # v2 : articles.masque ; v3 : table sources ; v4 : collectes.nb_supprimes ;
                     # v5 : index couvrants ; v6 : sources.etag, derniere_modif, echecs,
                     # pause_jusqu_a ; v7 : themes.actif/ordre, sources.langue/frequence/theme/
                     # origine ; v8 : articles.lat/lon/lieu, table lieux_geocodes ;
                     # v9 : table evenements, articles.evenement_id ;
-                    # v10 : index couvrant idx_evenements_fil
+                    # v10 : index couvrant idx_evenements_fil ;
+                    # v11 : articles.langue, evenements.langues ;
+                    # v12 : idx_evenements_carte porte aussi langues, lieu et titre ;
+                    # v13 : articles.theme_ia, table themes_ia ;
+                    # v14 : table recaps ;
+                    # v15 : articles.theme_force, D04 assoupli (voir PUBLIABLE)
 
 TYPES_SOURCES = {
     "rss": "Flux RSS / Atom",
@@ -148,6 +154,7 @@ CREATE TABLE IF NOT EXISTS articles (
     lon           REAL,
     lieu          TEXT,                         -- nom du lieu retenu, affiché au survol
     lieu_origine  TEXT,                         -- flux | gazetteer | nominatim | photon
+    langue        TEXT NOT NULL DEFAULT 'fr',   -- v11 : langue de la source
     -- v9 : événement dont cet article est une des sources
     evenement_id  INTEGER REFERENCES evenements(id) ON DELETE SET NULL
 );
@@ -169,12 +176,40 @@ CREATE TABLE IF NOT EXISTS evenements (
     -- chaque écriture plutôt que recalculé à la lecture : un EXISTS par événement coûtait
     -- 268 ms sur la vue mondiale (bancs/bench_carte.py).
     nb_sources  INTEGER NOT NULL DEFAULT 0,
+    -- v11 : langues de ses sources publiables, entourées de virgules — ",fr," ou ",en,fr,".
+    -- Les virgules encadrantes évitent qu'un code soit reconnu dans un autre : instr(…, ",fr,")
+    -- ne peut pas accrocher un futur ",fra,".
+    langues     TEXT NOT NULL DEFAULT '',
     maj         TEXT NOT NULL
 );
 
 -- v8 : cache de géocodage. Les conditions d'usage de Nominatim l'imposent, et de toute
 -- façon un lieu ne doit jamais être demandé deux fois. Les échecs sont mémorisés aussi,
 -- sans quoi les mêmes introuvables repartiraient à chaque collecte.
+-- v14 : récapitulatif du jour écrit par le modèle de langage, un par thème. Stocké et
+-- non recalculé à la demande : une page qui s'affiche ne doit jamais déclencher un appel
+-- à un service extérieur, encore moins un par visiteur.
+CREATE TABLE IF NOT EXISTS recaps (
+    jour        TEXT NOT NULL,     -- AAAA-MM-JJ, en UTC comme tout le reste
+    theme       TEXT NOT NULL,     -- code de thème
+    texte       TEXT NOT NULL,
+    modele      TEXT NOT NULL,
+    nb_articles INTEGER NOT NULL,  -- articles résumés : sert à savoir s'il faut refaire
+    maj         TEXT NOT NULL,
+    PRIMARY KEY (jour, theme)
+);
+
+-- v13 : cache du classement par modèle de langage. Même règle que pour le géocodage :
+-- une question posée une fois ne doit jamais être reposée. La clé contient le modèle et la
+-- liste des thèmes, parce qu'en changer change la question.
+CREATE TABLE IF NOT EXISTS themes_ia (
+    cle     TEXT PRIMARY KEY,   -- empreinte du titre normalisé, du modèle et des thèmes
+    titre   TEXT NOT NULL,      -- gardé pour pouvoir relire ce qui a été soumis
+    theme   TEXT,               -- NULL = le modèle n'a pas su classer
+    modele  TEXT NOT NULL,
+    ajout   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS lieux_geocodes (
     cle          TEXT PRIMARY KEY,   -- nom normalisé (minuscules, sans accents)
     nom          TEXT NOT NULL,      -- nom renvoyé par le service
@@ -229,26 +264,50 @@ CREATE INDEX IF NOT EXISTS idx_articles_carte ON articles(masque, date_pub, lat,
 -- v9 : regroupement. idx_evenements_fin sert à chercher les candidats dans la fenêtre de
 -- temps ; idx_articles_evenement à lister les sources d'un événement.
 CREATE INDEX IF NOT EXISTS idx_evenements_fin       ON evenements(date_fin);
-CREATE INDEX IF NOT EXISTS idx_evenements_carte     ON evenements(theme, date_fin, lat, lon, nb_sources);
+-- v12 : index couvrant de la carte. Il porte TOUT ce que /api/evenements lit, langues
+-- comprise : la requête ne touche plus la table. Avec un filtre de langue, 111 -> 25 ms sur
+-- 66 000 événements ; sans filtre, 34 -> 21 ms. Coût : 1,8 Mio.
+-- Le DROP précède le CREATE parce que « CREATE INDEX IF NOT EXISTS » ne refait pas un index
+-- existant dont les colonnes ont changé : sans lui, une base déjà migrée garderait l'ancien.
+DROP INDEX IF EXISTS idx_evenements_carte;
+CREATE INDEX IF NOT EXISTS idx_evenements_carte     ON evenements(theme, date_fin, lat, lon,
+                                                     nb_sources, langues, lieu, titre);
 -- v10 : index couvrant du fil groupé. Les compteurs de /api/articles (nombre d'événements,
 -- de nouveautés, d'articles) balayaient la fenêtre entière en ouvrant la table : 82 ms sur
 -- 66 000 événements, contre 11 ms en lisant cet index seul.
 CREATE INDEX IF NOT EXISTS idx_evenements_fil       ON evenements(theme, date_fin DESC,
-                                                     nb_sources, maj, lieu, lat, lon, zone);
+                                                     nb_sources, maj, lieu, lat, lon, zone,
+                                                     langues);
 CREATE INDEX IF NOT EXISTS idx_articles_evenement   ON articles(evenement_id);
 """
 
-VUES = """
+# D04, révisé en v15. La règle d'origine — diffuser seulement ce qui a une zone ET un thème
+# — datait de la carte des six zones, où un article sans zone n'avait littéralement nulle
+# part où s'afficher. Depuis la carte à points, la zone n'apparaît plus sur le site et la
+# carte ne montre que les articles localisés : l'exigence ne protégeait plus rien de visible.
+#
+# Elle coûtait cher, en revanche : sur 1 372 articles réels du 28/10/2026, 452 (un tiers)
+# avaient un thème mais aucune zone et restaient invisibles — surtout les avis du CERT-FR et
+# les notes d'instituts, qui ne nomment aucun lieu et n'en nommeront jamais.
+#
+# Un flux à thème imposé dit lui-même de quoi il parle : son thème ne se devine pas, il est
+# déclaré. Exiger en plus une zone revenait à jeter ce qu'on savait déjà. Les flux
+# généralistes, eux, gardent la règle : sans zone ni thème trouvés, rien ne garantit qu'un
+# de leurs articles ait sa place quelque part.
+PUBLIABLE = "theme IS NOT NULL AND (zone IS NOT NULL OR theme_force = 1)"
+
+VUES = f"""
 DROP VIEW IF EXISTS fil;
 DROP VIEW IF EXISTS a_trier;
 
--- Articles publiables : zone ET thème connus, non masqués
+-- Articles publiables : un thème, et une zone ou un thème imposé par la source
 CREATE VIEW fil AS
-    SELECT * FROM articles WHERE zone IS NOT NULL AND theme IS NOT NULL AND masque = 0;
+    SELECT * FROM articles WHERE {PUBLIABLE} AND masque = 0;
 
--- Articles que le tri automatique n'a pas su classer (hors articles masqués)
+-- Articles que le tri automatique n'a pas su classer (hors articles masqués).
+-- Exactement le complément de « fil » : les deux vues ne peuvent pas diverger.
 CREATE VIEW a_trier AS
-    SELECT * FROM articles WHERE (zone IS NULL OR theme IS NULL) AND masque = 0;
+    SELECT * FROM articles WHERE NOT ({PUBLIABLE}) AND masque = 0;
 """
 
 
@@ -295,9 +354,14 @@ def ouvrir(chemin=BASE, multi_thread: bool = False) -> sqlite3.Connection:
                     cx.execute(f"ALTER TABLE sources ADD COLUMN {nom} {definition}")
             for nom, definition in (("lat", "REAL"), ("lon", "REAL"),                  # v8
                                     ("lieu", "TEXT"), ("lieu_origine", "TEXT"),
-                                    ("evenement_id", "INTEGER REFERENCES evenements(id)")):  # v9
+                                    ("evenement_id", "INTEGER REFERENCES evenements(id)"),  # v9
+                                    ("langue", "TEXT NOT NULL DEFAULT 'fr'"),          # v11
+                                    ("theme_ia", "INTEGER NOT NULL DEFAULT 0"),      # v13
+                                    ("theme_force", "INTEGER NOT NULL DEFAULT 0")):  # v15
                 if nom not in colonnes:
                     cx.execute(f"ALTER TABLE articles ADD COLUMN {nom} {definition}")
+            if "langues" not in {r["name"] for r in cx.execute("PRAGMA table_info(evenements)")}:
+                cx.execute("ALTER TABLE evenements ADD COLUMN langues TEXT NOT NULL DEFAULT ''")
             for nom, definition in (("actif", "INTEGER NOT NULL DEFAULT 1"),           # v7
                                     ("ordre", "INTEGER NOT NULL DEFAULT 0")):
                 if nom not in {r["name"] for r in cx.execute("PRAGMA table_info(themes)")}:
@@ -309,6 +373,14 @@ def ouvrir(chemin=BASE, multi_thread: bool = False) -> sqlite3.Connection:
             cx.executemany("INSERT OR REPLACE INTO zones VALUES (?, ?)", ZONES.items())
             appliquer_themes(cx)
             appliquer_flux(cx)
+            if "theme_force" not in colonnes:
+                # v15 : les articles déjà en base ne portent pas le drapeau. On le reconstitue
+                # depuis la source, après appliquer_flux() pour que theme_impose soit à jour.
+                # Sans cela, un tiers du fonds resterait invisible jusqu'à une recollecte qui
+                # n'aura jamais lieu : un article déjà connu n'est pas réécrit.
+                cx.execute("UPDATE articles SET theme_force = 1 WHERE theme IS NOT NULL "
+                           "AND source IN (SELECT nom FROM sources "
+                           "               WHERE theme_impose IS NOT NULL)")
             cx.execute(f"PRAGMA user_version = {VERSION_SCHEMA}")
         cx.commit()
     except Exception:
@@ -432,18 +504,26 @@ def fin_collecte(cx, collecte_id: int, fin: datetime, nb_lus: int, nb_nouveaux: 
     cx.commit()
 
 
+DUREE_RECAPS = timedelta(days=90)   # les récapitulatifs survivent aux articles qu'ils résument
+
+
 def purger(cx, maintenant: datetime, collecte_id: int = None) -> int:
     """D05 : supprime définitivement les articles publiés il y a plus de 30 jours
     (y compris ceux classés à la main ou masqués). Renvoie le nombre d'articles supprimés.
     Les événements qui n'ont plus aucune source disparaissent avec eux."""
     limite = (maintenant - DUREE_FIL).isoformat()
+    # Un récapitulatif tient dans quelques lignes et coûte un appel au modèle : le garder
+    # trois mois, bien après les articles, donne une mémoire du mois écoulé pour rien.
+    cx.execute("DELETE FROM recaps WHERE jour < ?",
+               ((maintenant - DUREE_RECAPS).strftime("%Y-%m-%d"),))
     n = cx.execute("DELETE FROM articles WHERE date_pub < ?", (limite,)).rowcount
     cx.execute("DELETE FROM evenements WHERE id NOT IN "
                "(SELECT evenement_id FROM articles WHERE evenement_id IS NOT NULL)")
     # depuis « fil » et non « articles » : nb_sources compte les sources PUBLIABLES,
     # celles que le site montre vraiment (zone et thème connus, non masquées)
-    cx.execute("""UPDATE evenements SET nb_sources =
-                    (SELECT COUNT(*) FROM fil WHERE evenement_id = evenements.id)""")
+    cx.execute(f"""UPDATE evenements SET
+                     nb_sources = ({SQL_NB_SOURCES.format(id="evenements.id")}),
+                     langues    = ({SQL_LANGUES.format(id="evenements.id")})""")
     if collecte_id is not None:
         cx.execute("UPDATE collectes SET nb_supprimes = ? WHERE id = ?", (n, collecte_id))
     cx.commit()
@@ -558,18 +638,36 @@ def rattacher(cx, a: dict, titre_norm: str, date: datetime, maintenant: datetime
     return cur.lastrowid, True
 
 
-def rafraichir_compteur(cx, evenement_id: int):
-    """Recompte les sources publiables d'un événement.
+# Sous-requêtes partagées entre la mise à jour unitaire et le recalcul complet de purger(),
+# pour qu'elles ne puissent pas diverger — c'est déjà arrivé une fois.
+# {id} vaut « ? » pour un événement précis, « evenements.id » pour un recalcul complet.
+SQL_NB_SOURCES = "SELECT COUNT(*) FROM fil WHERE evenement_id = {id}"
+SQL_LANGUES = ("SELECT COALESCE(',' || GROUP_CONCAT(DISTINCT langue) || ',', '') "
+               "FROM fil WHERE evenement_id = {id}")
+
+
+def rafraichir_evenement(cx, evenement_id: int):
+    """Recompte les sources publiables d'un événement et relève leurs langues.
 
     À appeler après toute écriture qui peut les changer : nouvel article, masquage,
-    classement manuel. Une écriture SQL directe, hors de ces chemins, laisserait le
-    compteur faux — c'est pourquoi purger(), lancée à chaque collecte, les recompte tous.
+    classement manuel. Une écriture SQL directe, hors de ces chemins, laisserait ces
+    valeurs fausses — c'est pourquoi purger(), lancée à chaque collecte, les recalcule
+    toutes.
     """
     if evenement_id is None:
         return
-    cx.execute("UPDATE evenements SET nb_sources = "
-               "(SELECT COUNT(*) FROM fil WHERE evenement_id = ?) WHERE id = ?",
-               (evenement_id, evenement_id))
+    cx.execute(f'UPDATE evenements SET nb_sources = ({SQL_NB_SOURCES.format(id="?")}), '
+               f'langues = ({SQL_LANGUES.format(id="?")}) WHERE id = ?',
+               (evenement_id, evenement_id, evenement_id))
+
+
+def langue_sql(langue: str, prefixe: str = "") -> tuple:
+    """Clause de filtre par langue, côté articles comme côté événements."""
+    if not langue:
+        return "", []
+    if prefixe:   # table evenements : plusieurs langues possibles pour un même point
+        return f" AND instr({prefixe}langues, ?) > 0", [f",{langue},"]
+    return " AND langue = ?", [langue]
 
 
 def enregistrer(cx, a: dict, titre_norm: str, maintenant: datetime, collecte_id: int) -> str:
@@ -603,13 +701,70 @@ def enregistrer(cx, a: dict, titre_norm: str, maintenant: datetime, collecte_id:
     cx.execute(
         """INSERT INTO articles (lien, titre, titre_norm, source, date_pub, zone, theme,
                                  ajout, maj, collecte_id, lat, lon, lieu, lieu_origine,
-                                 evenement_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                 evenement_id, langue, theme_ia, theme_force)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (a["lien"], a["titre"], titre_norm, a["source"], date.isoformat(),
          a["zone"], a["theme"], maintenant.isoformat(), maintenant.isoformat(), collecte_id,
-         a.get("lat"), a.get("lon"), a.get("lieu"), a.get("lieu_origine"), evenement_id))
-    rafraichir_compteur(cx, evenement_id)
+         a.get("lat"), a.get("lon"), a.get("lieu"), a.get("lieu_origine"), evenement_id,
+         a.get("langue") or "fr", 1 if a.get("theme_ia") else 0,
+         1 if a.get("theme_force") else 0))
+    rafraichir_evenement(cx, evenement_id)
     return "nouveau" if premier else "regroupe"
+
+
+def jour_utc(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%d")
+
+
+def articles_du_jour(cx, jour: str, theme: str, limite: int = 60) -> list:
+    """Articles publiables d'un thème pour une journée, du plus récent au plus ancien.
+
+    Les bornes sont lexicographiques sur la date ISO, ce qui laisse l'index sur date_pub
+    travailler : « 2026-10-28T09:00:00+00:00 » est bien entre « 2026-10-28 » et « 2026-10-29 ».
+    """
+    return cx.execute(
+        "SELECT titre, source, lieu, langue FROM fil "
+        "WHERE theme = ? AND date_pub >= ? AND date_pub < ? "
+        "ORDER BY date_pub DESC LIMIT ?",
+        (theme, jour, jour + "z", limite)).fetchall()
+
+
+def compter_articles_du_jour(cx, jour: str, theme: str) -> int:
+    return cx.execute("SELECT COUNT(*) FROM fil WHERE theme = ? AND date_pub >= ? "
+                      "AND date_pub < ?", (theme, jour, jour + "z")).fetchone()[0]
+
+
+def lire_recap(cx, jour: str, theme: str):
+    return cx.execute("SELECT * FROM recaps WHERE jour = ? AND theme = ?",
+                      (jour, theme)).fetchone()
+
+
+def lister_recaps(cx, jour: str, themes=None) -> list:
+    ou, p = "jour = ?", [jour]
+    if themes:
+        ou += f" AND theme IN ({','.join('?' * len(themes))})"
+        p += list(themes)
+    return cx.execute(f"SELECT * FROM recaps WHERE {ou} ORDER BY theme", p).fetchall()
+
+
+def dernier_jour_avec_recap(cx, themes=None) -> str:
+    """Jour le plus récent qui a au moins un récapitulatif — la veille, en début de matinée."""
+    ou, p = "1 = 1", []
+    if themes:
+        ou = f"theme IN ({','.join('?' * len(themes))})"
+        p = list(themes)
+    ligne = cx.execute(f"SELECT MAX(jour) FROM recaps WHERE {ou}", p).fetchone()
+    return ligne[0] if ligne else None
+
+
+TAILLE_MAX_RECAP = 4000   # un récapitulatif plus long qu'une page n'en est plus un
+
+
+def ecrire_recap(cx, jour: str, theme: str, texte: str, modele: str, nb: int,
+                 maintenant: datetime):
+    cx.execute("INSERT OR REPLACE INTO recaps (jour, theme, texte, modele, nb_articles, maj) "
+               "VALUES (?, ?, ?, ?, ?, ?)",
+               (jour, theme, texte[:TAILLE_MAX_RECAP], modele, nb, maintenant.isoformat()))
 
 
 def classer_a_la_main(cx, article_id: int, zone: str, theme: str, maintenant: datetime) -> bool:
@@ -626,7 +781,7 @@ def classer_a_la_main(cx, article_id: int, zone: str, theme: str, maintenant: da
 def _compteur_de_l_article(cx, article_id: int):
     ligne = cx.execute("SELECT evenement_id FROM articles WHERE id = ?", (article_id,)).fetchone()
     if ligne:
-        rafraichir_compteur(cx, ligne["evenement_id"])
+        rafraichir_evenement(cx, ligne["evenement_id"])
 
 
 def masquer(cx, article_id: int, masque: bool, maintenant: datetime) -> bool:
