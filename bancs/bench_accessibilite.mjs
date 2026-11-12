@@ -36,6 +36,7 @@ for (const theme of ['light', 'dark']) {
       ['lien article', '#list .meta a'], ['puce de thème', '#themes .chip'],
       ['puce active', '#vues .chip[aria-pressed="true"]'], ['pied de page', 'footer'],
       ['état de la carte', '#carte-etat'], ['badge Nouveau', '.badge'],
+      ['extrait', '#list .extrait'], ['orientation', '#list .orient'],
       ['récap, titre', '#recap summary h2'], ['récap, thème', '#recap h3'],
       ['récap, texte', '#recap p'], ['récap, signature', '#recap .signature'],
     ];

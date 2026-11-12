@@ -24,6 +24,7 @@ GEOCODAGE_JSON = CONFIG / "geocodage.json"
 CARTE_JSON = CONFIG / "carte.json"
 FLUX_JSON = CONFIG / "flux.json"
 SITE_JSON = CONFIG / "site.json"
+ORIENTATIONS_JSON = CONFIG / "orientations.json"
 DUREE_FIL = timedelta(days=30)   # D05 : durée de conservation ; au-delà, l'article est supprimé à la collecte
 DUREE_NOUVEAU = timedelta(hours=48)   # F06 : repère « Nouveau »
 
@@ -160,7 +161,7 @@ def recharger_themes_si_modifies() -> bool:
         _empreinte_chargee = empreinte
         return True
 
-VERSION_SCHEMA = 17  # v2 : articles.masque ; v3 : table sources ; v4 : collectes.nb_supprimes ;
+VERSION_SCHEMA = 18  # v2 : articles.masque ; v3 : table sources ; v4 : collectes.nb_supprimes ;
                     # v5 : index couvrants ; v6 : sources.etag, derniere_modif, echecs,
                     # pause_jusqu_a ; v7 : themes.actif/ordre, sources.langue/frequence/theme/
                     # origine ; v8 : articles.lat/lon/lieu, table lieux_geocodes ;
@@ -172,7 +173,8 @@ VERSION_SCHEMA = 17  # v2 : articles.masque ; v3 : table sources ; v4 : collecte
                     # v14 : table recaps ;
                     # v15 : articles.theme_force, D04 assoupli (voir PUBLIABLE) ;
                     # v16 : lieux de pays réécrits en français ;
-                    # v17 : villes aussi (exonymes.json, section « affichage »)
+                    # v17 : villes aussi (exonymes.json, section « affichage ») ;
+                    # v18 : articles.extrait
 
 TYPES_SOURCES = {
     "rss": "Flux RSS / Atom",
@@ -434,7 +436,8 @@ def ouvrir(chemin=BASE, multi_thread: bool = False) -> sqlite3.Connection:
                                     ("evenement_id", "INTEGER REFERENCES evenements(id)"),  # v9
                                     ("langue", "TEXT NOT NULL DEFAULT 'fr'"),          # v11
                                     ("theme_ia", "INTEGER NOT NULL DEFAULT 0"),      # v13
-                                    ("theme_force", "INTEGER NOT NULL DEFAULT 0")):  # v15
+                                    ("theme_force", "INTEGER NOT NULL DEFAULT 0"),  # v15
+                                    ("extrait", "TEXT")):                            # v18
                 if nom not in colonnes:
                     cx.execute(f"ALTER TABLE articles ADD COLUMN {nom} {definition}")
             if "langues" not in {r["name"] for r in cx.execute("PRAGMA table_info(evenements)")}:
@@ -638,12 +641,20 @@ meme mes moi mon ne nos notre nous on ou par pas pour qu que qui sa se ses son s
 toi ton tu un une vos votre vous y ont est sont etre avoir plus moins apres avant contre
 entre vers chez sans sous tres bien fait faire dit selon the of and in on for to from with
 at by as is are was were be been has have had its their this that
+janvier fevrier mars avril mai juin juillet aout septembre octobre novembre decembre
+january february march april june july august october november december
 """.split())
+
+# Un millésime dans un titre n'est pas un sujet. Les avis du CERT-FR s'intitulent tous
+# « Multiples vulnérabilités dans X (26 octobre 2026) » : le mois et l'année y pesaient
+# autant que le produit concerné, et suffisaient à rapprocher deux avis sans rapport.
+ANNEE = re.compile(r"^(19|20)\d\d$")
 
 
 def jetons_titre(titre_norm: str) -> frozenset:
     """Mots porteurs de sens d'un titre déjà normalisé (voir collect.normaliser)."""
-    return frozenset(m for m in titre_norm.split() if len(m) > 2 and m not in MOTS_VIDES)
+    return frozenset(m for m in titre_norm.split()
+                     if len(m) > 2 and m not in MOTS_VIDES and not ANNEE.match(m))
 
 
 def similarite(a: frozenset, b: frozenset) -> float:
@@ -721,7 +732,12 @@ def rattacher(cx, a: dict, titre_norm: str, date: datetime, maintenant: datetime
 # Sous-requêtes partagées entre la mise à jour unitaire et le recalcul complet de purger(),
 # pour qu'elles ne puissent pas diverger — c'est déjà arrivé une fois.
 # {id} vaut « ? » pour un événement précis, « evenements.id » pour un recalcul complet.
-SQL_NB_SOURCES = "SELECT COUNT(*) FROM fil WHERE evenement_id = {id}"
+# DISTINCT : « nb_sources » compte des MÉDIAS, pas des articles. Le CERT-FR publie
+# quinze avis par jour, et deux avis du même émetteur ne se corroborent pas — les compter
+# séparément faisait remonter un paquet d'avis sans rapport en tête des « sujets les plus
+# repris », là où l'on attend les faits que plusieurs rédactions ont jugés dignes d'être
+# traités.
+SQL_NB_SOURCES = "SELECT COUNT(DISTINCT source) FROM fil WHERE evenement_id = {id}"
 SQL_LANGUES = ("SELECT COALESCE(',' || GROUP_CONCAT(DISTINCT langue) || ',', '') "
                "FROM fil WHERE evenement_id = {id}")
 
@@ -764,9 +780,16 @@ def enregistrer(cx, a: dict, titre_norm: str, maintenant: datetime, collecte_id:
     """
     if a["date"] and a["date"] < maintenant - DUREE_FIL:
         return "ancien"
-    ligne = cx.execute("SELECT id, zone, theme, manuel FROM articles WHERE lien = ?",
+    ligne = cx.execute("SELECT id, zone, theme, manuel, extrait FROM articles WHERE lien = ?",
                        (a["lien"],)).fetchone()
     if ligne:
+        # L'extrait est arrivé en v18 : les articles plus anciens n'en ont pas, et rien ne
+        # les réécrit. On le complète quand le flux le redonne, ce qui remplit le fonds en
+        # une collecte au lieu d'attendre trente jours que tout se renouvelle. On ne touche
+        # qu'un extrait ABSENT : si le média a changé son chapô, le sien fait foi.
+        extrait = extrait_court(a.get("resume"))
+        if extrait and not ligne["extrait"]:
+            cx.execute("UPDATE articles SET extrait = ? WHERE id = ?", (extrait, ligne["id"]))
         if ligne["manuel"] or (ligne["zone"] and ligne["theme"]):
             return "inchange"
         zone, theme = ligne["zone"] or a["zone"], ligne["theme"] or a["theme"]
@@ -781,15 +804,69 @@ def enregistrer(cx, a: dict, titre_norm: str, maintenant: datetime, collecte_id:
     cx.execute(
         """INSERT INTO articles (lien, titre, titre_norm, source, date_pub, zone, theme,
                                  ajout, maj, collecte_id, lat, lon, lieu, lieu_origine,
-                                 evenement_id, langue, theme_ia, theme_force)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                 evenement_id, langue, theme_ia, theme_force, extrait)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (a["lien"], a["titre"], titre_norm, a["source"], date.isoformat(),
          a["zone"], a["theme"], maintenant.isoformat(), maintenant.isoformat(), collecte_id,
          a.get("lat"), a.get("lon"), a.get("lieu"), a.get("lieu_origine"), evenement_id,
          a.get("langue") or "fr", 1 if a.get("theme_ia") else 0,
-         1 if a.get("theme_force") else 0))
+         1 if a.get("theme_force") else 0, extrait_court(a.get("resume")) or None))
     rafraichir_evenement(cx, evenement_id)
     return "nouveau" if premier else "regroupe"
+
+
+# Deux ou trois phrases, et au plus mille signes : de quoi dire de quoi parle l'article
+# sans en recopier le corps. Le cahier des charges demande « titre, extrait court, source et
+# lien » (C03) — l'extrait est attendu, la recopie complète est interdite.
+PHRASES_EXTRAIT = 3
+LONGUEUR_EXTRAIT = 400
+FIN_DE_PHRASE = re.compile(r"(?<=[.!?…])\s+")
+
+
+def extrait_court(texte: str) -> str:
+    """Les premières phrases d'un chapô, coupées proprement.
+
+    Le texte vient du flux : c'est le média lui-même qui l'écrit, ce qui vaut mieux qu'un
+    résumé produit à partir du seul titre — lequel ne pourrait qu'inventer. Quand le flux
+    ne donne rien, on ne met rien.
+    """
+    texte = (texte or "").strip()
+    if not texte:
+        return ""
+    phrases = FIN_DE_PHRASE.split(texte)[:PHRASES_EXTRAIT]
+    court = " ".join(p.strip() for p in phrases if p.strip())
+    if len(court) <= LONGUEUR_EXTRAIT:
+        return court
+    # coupe au dernier espace avant la limite, pour ne pas trancher un mot en deux
+    coupe = court[:LONGUEUR_EXTRAIT].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return coupe + "…"
+
+
+# Repère d'orientation éditoriale. Il porte sur la SOURCE, pas sur l'article : une ligne
+# éditoriale est publique, documentée et stable, le penchant supposé d'une dépêche ne l'est
+# pas. C'est un jugement, pas une mesure, et le fichier le dit.
+def charger_orientations(chemin: Path = None) -> dict:
+    """Lit config/orientations.json. Fichier absent ou « actif: false » = pas de repère."""
+    chemin = Path(chemin or ORIENTATIONS_JSON)
+    if not chemin.exists():
+        return {"actif": False, "axe": {}, "sources": {}}
+    d = json.loads(chemin.read_text(encoding="utf-8"))
+    sources = {}
+    for nom, s in (d.get("sources") or {}).items():
+        if nom.startswith("_"):
+            continue            # lignes de commentaire glissées dans la liste
+        if not isinstance(s, dict) or not s.get("etiquette"):
+            raise ValueError(f"config/orientations.json : « {nom} » doit avoir une étiquette.")
+        position = s.get("position")
+        if position is not None and not (isinstance(position, (int, float))
+                                         and -100 <= position <= 100):
+            raise ValueError(f"config/orientations.json : la position de « {nom} » doit être "
+                             f"un nombre entre -100 et 100, ou null. Reçu : {position!r}")
+        sources[nom] = {"position": position, "etiquette": s["etiquette"],
+                        "pourquoi": s.get("pourquoi", "")}
+    return {"actif": bool(d.get("actif", True)),
+            "axe": {c: v for c, v in (d.get("axe") or {}).items() if not c.startswith("_")},
+            "sources": sources}
 
 
 def jour_utc(moment: datetime) -> str:

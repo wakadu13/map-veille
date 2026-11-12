@@ -96,6 +96,7 @@ déroutant — la puce du thème manque dans la barre, et ses articles s'affiche
 | `config/flux.json` | Les sources : nom, type, adresse, thème imposé, langue, fréquence de rafraîchissement |
 | `config/carte.json` | Le fond de carte : serveur de tuiles, attribution, vue initiale, nombre de points |
 | `config/site.json` | L'affichage : langue sur laquelle le site s'ouvre |
+| `config/orientations.json` | L'orientation éditoriale de chaque source, affichée sous les articles |
 | `config/geocodage.json` | Le service de géocodage extérieur — **désactivé par défaut** |
 | `config/ia.json` | Le modèle de langage qui classe les thèmes douteux — **désactivé par défaut** |
 | `config/exonymes.json` | Les noms français des lieux : ceux qu'on **reconnaît**, et ceux qu'on **affiche** |
@@ -331,6 +332,34 @@ Un article classé par le modèle est marqué (`articles.theme_ia`) : `admin.py 
 `admin.py classer` corrige à la main ce qui est faux. **Un article classé à la main n'est plus
 jamais modifié**, ni par les mots-clés ni par le modèle.
 
+## Ce qui s'affiche sous un article
+
+**Un extrait de deux ou trois phrases.** C'est le chapô que le média publie lui-même dans son
+flux. Il était jusqu'ici calculé pour le tri puis jeté ; il est désormais conservé, coupé à la
+phrase et plafonné à 400 signes — le cahier des charges demande « titre, extrait court, source
+et lien » (C03), et interdit la recopie complète. Un flux qui n'en donne pas n'affiche rien :
+faire écrire trois phrases à un modèle de langage à partir du seul titre ne résumerait rien,
+cela inventerait. Sur les sources livrées, 57 % des articles ont un extrait.
+
+**Un repère d'orientation éditoriale**, sur l'axe gauche-droite français : un curseur sur un
+dégradé, et l'étiquette écrite à côté — le sens ne repose jamais sur la seule couleur. Trois
+partis pris :
+
+- il porte sur **la source, pas sur l'article**. Une ligne éditoriale est publique, documentée
+  et stable ; le penchant supposé d'une dépêche prise isolément ne l'est ni l'un ni l'autre, et
+  le faire juger par un modèle de langage donnerait une étiquette différente à chaque collecte,
+  sur un sujet où se tromper n'est pas anodin ;
+- c'est **un jugement, pas une mesure**. Chaque entrée de `config/orientations.json` porte un
+  champ `pourquoi` qui dit sur quoi elle repose, lisible au survol. Relisez-les, corrigez-les ;
+- **la plupart des sources sont « non classées », et c'est volontaire.** Six seulement sont
+  placées sur l'axe. Une agence de cybersécurité, une revue universitaire ou un institut
+  américain n'ont pas de position gauche-droite française — leur en inventer une serait pire
+  que de n'en donner aucune. Leur étiquette dit alors ce qu'elles sont : « Service public »,
+  « Presse spécialisée », « Institut étranger ».
+
+`"actif": false` retire le repère du site sans rien effacer, et `admin.py config` liste les
+sources placées et celles qui manquent.
+
 ## Ce qui est diffusé, et ce qui ne l'est pas
 
 Un article est diffusé s'il a **un thème**, et **une zone ou un thème imposé par sa source**.
@@ -465,6 +494,11 @@ Trois conditions, **toutes nécessaires** : moins de 50 km, moins de 48 h d'éca
 titres qui se ressemblent assez. Le seuil de ressemblance dépend de ce que le lieu dit déjà :
 28 % de mots communs si les deux articles sont au même endroit, 45 % sinon.
 
+Les mois et les millésimes sont écartés des mots comparés : les avis du CERT-FR
+s'intitulent tous « Multiples vulnérabilités dans X (26 octobre 2026) », et la date y pesait
+autant que le produit — assez pour rapprocher deux avis sans rapport. Et `nb_sources` compte
+des **médias distincts**, pas des articles : deux avis du même émetteur ne se corroborent pas.
+
 Les seuils sont réglés et surveillés sur `tests/regroupement_annote.json`, des paires de
 manchettes annotées à la main. Ils penchent volontairement du côté de la séparation :
 réunir deux faits distincts est pire que les laisser côte à côte, car le lecteur ne voit
@@ -486,11 +520,11 @@ projet ; le filtre par langue est la façon de n'en voir qu'un.
 ## La base de données
 
 `donnees/map.sqlite` est créée au premier lancement et migrée automatiquement. Le schéma est
-dans `collecteur/base.py` (version 15).
+dans `collecteur/base.py` (version 18).
 
 | Table ou vue | Contenu |
 |---|---|
-| `articles` | Titre, source, date, lien, zone, thème (et s'il vient du modèle), **langue**, **position**, événement, correction manuelle, masquage |
+| `articles` | Titre, **extrait**, source, date, lien, zone, thème (et s'il vient du modèle), **langue**, **position**, événement, correction manuelle, masquage |
 | `evenements` | Un fait = une ligne : titre, lieu, position, période, nombre de sources publiables, langues présentes |
 | `themes`, `zones` | Référentiels. `themes` vient de `config/themes.json` |
 | `sources` | Les sources : état du cache conditionnel, disjoncteur, langue, fréquence, origine |
@@ -522,14 +556,15 @@ Un article classé à la main n'est plus jamais modifié par le collecteur.
 |---|---|---|
 | `GET /api/referentiel` | – | Zones, thèmes actifs, langues, langue d'ouverture, réglages de la carte |
 | `GET /api/synthese` | `theme`, `themes`, `langue`, `jours`, `zones` | Total, date de la dernière collecte, sources ; comptages par zone si `zones=1` |
-| `GET /api/articles` | `zone`, `theme`, `themes`, `langue`, `jours`, `limite`, `decalage`, `grouper` | Le fil, une ligne par événement par défaut |
+| `GET /api/articles` | `zone`, `theme`, `themes`, `langue`, `jours`, `tri`, `limite`, `decalage`, `grouper` | Le fil, une ligne par événement par défaut |
 | `GET /api/evenements` | `theme`, `themes`, `zone`, `langue`, `jours`, `bbox`, `limite` | Les points de la carte, les plus suivis d'abord |
 | `GET /api/evenements/{id}` | – | Un événement et **toutes ses sources** |
 | `GET /api/recap` | `jour`, `theme`, `themes` | Le récapitulatif quotidien déjà écrit (cette route ne calcule rien) |
 | `GET /api/direct` | – | Flux Server-Sent Events : signale qu'une collecte a eu lieu |
 | `GET /api/collectes` | `limite` | Journal des collectes et état de chaque source |
 
-`themes` accepte une liste séparée par des virgules. `bbox` s'écrit `ouest,sud,est,nord` en
+`tri` vaut `date` (défaut) ou `reprises`, qui fait remonter les sujets que le plus de
+sources ont relayés. `themes` accepte une liste séparée par des virgules. `bbox` s'écrit `ouest,sud,est,nord` en
 degrés et accepte le passage de l'antiméridien. `langue` vaut `fr`, `en`, ou rien (ou
 `toutes`) pour ne pas filtrer. Un code inconnu renvoie 422 ; si la base n'existe pas
 encore, 503.
@@ -548,6 +583,11 @@ français, les sources anglaises continuant d'être collectées et une puce suff
 afficher. `null` rend toutes les langues d'emblée. Le choix du visiteur l'emporte toujours :
 dès qu'il touche une puce, sa préférence est retenue dans son navigateur — y compris
 « Toutes », qui est un choix comme un autre — et le réglage ne s'applique plus à lui.
+
+Le fil se trie par date, ou par **« Les plus repris »** : les sujets que le plus de médias
+ont relayés. C'est la question « de quoi parle-t-on le plus ? », que l'ordre chronologique
+noie — un fait repris par huit rédactions s'y trouve dispersé en huit lignes d'heures
+diverses.
 
 En haut, le **récapitulatif du jour** quand il existe : un bloc pliable (`<details>`, donc
 pliable au clavier sans une ligne de JavaScript), une colonne par thème sur grand écran, le
