@@ -475,12 +475,21 @@ def ouvrir(chemin=BASE, multi_thread: bool = False) -> sqlite3.Connection:
 
 def a_jour(cx) -> bool:
     """Vrai si le schéma est à la bonne version et les référentiels identiques à la
-    configuration. Modifier config/themes.json suffit donc à déclencher une mise à jour
-    de la base à la prochaine ouverture : rien à lancer à la main."""
+    configuration. Modifier config/themes.json ou config/flux.json suffit donc à déclencher
+    une mise à jour de la base à la prochaine ouverture : rien à lancer à la main."""
     if cx.execute("PRAGMA user_version").fetchone()[0] != VERSION_SCHEMA:
         return False
     try:
         if dict(cx.execute("SELECT code, nom FROM zones").fetchall()) != ZONES:
+            return False
+        # Un flux ajouté au fichier doit exister en base, sinon il n'est jamais interrogé
+        # et son absence ne se voit nulle part : ni erreur, ni ligne dans le journal, juste
+        # un silence. C'est arrivé, et il a fallu chercher pourquoi quinze journaux
+        # n'apparaissaient pas. Comparer les NOMS suffit : le reste des champs est réécrit
+        # à chaque application, seule une création manque sans cela.
+        declares = {f["nom"] for f in lire_config(FLUX_JSON, "flux")}
+        connus = {r[0] for r in cx.execute("SELECT nom FROM sources")}
+        if declares - connus:
             return False
         en_base = {r["code"]: (r["nom"], bool(r["actif"]), r["ordre"])
                    for r in cx.execute("SELECT code, nom, actif, ordre FROM themes")}

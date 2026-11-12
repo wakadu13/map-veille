@@ -395,3 +395,37 @@ def test_sans_changement_rien_n_est_relu(themes_isoles, monkeypatch):
     base.recharger_themes_si_modifies()        # met l'empreinte à jour
     monkeypatch.setattr(base, "charger_themes", interdit)
     assert base.recharger_themes_si_modifies() is False
+
+
+def test_un_flux_ajoute_au_fichier_est_cree_sans_migration(cx, tmp_path, monkeypatch):
+    """Sans cela, un flux ajouté au fichier n'était jamais interrogé, et son absence ne se
+    voyait nulle part : ni erreur, ni ligne dans le journal, juste un silence. Il a fallu
+    chercher pourquoi quinze journaux n'apparaissaient pas."""
+    assert base.a_jour(cx), "base fraîche : rien à faire"
+    fichier = ecrire(tmp_path / "flux.json", "flux",
+                     base.lire_config(base.FLUX_JSON, "flux")
+                     + [{"nom": "Journal tout neuf", "type": "rss",
+                         "url": "https://neuf.test/rss"}])
+    monkeypatch.setattr(base, "FLUX_JSON", fichier)
+    assert not base.a_jour(cx), "le fichier a changé : la base doit se mettre à jour"
+    base.appliquer_flux(cx, fichier)
+    cx.commit()
+    assert base.a_jour(cx)
+    assert "Journal tout neuf" in {s["nom"] for s in base.lister_sources(cx)}
+
+
+def test_une_source_retiree_du_fichier_ne_declenche_rien(cx, tmp_path, monkeypatch):
+    """Une source retirée reste en base, désactivée : sa présence n'est donc pas un écart."""
+    garde = base.lire_config(base.FLUX_JSON, "flux")[:3]
+    monkeypatch.setattr(base, "FLUX_JSON", ecrire(tmp_path / "flux.json", "flux", garde))
+    assert base.a_jour(cx), "moins de flux déclarés qu'en base : rien à créer"
+
+
+def test_les_journaux_generalistes_couvrent_le_spectre():
+    """L'axe d'orientation ne vaut que s'il y a des journaux à y placer : la veille ne
+    comptait qu'un seul quotidien français privé, et trois médias de service public."""
+    flux = base.lire_config(base.FLUX_JSON, "flux")
+    generalistes = {f["nom"] for f in flux
+                    if f.get("theme") is None and f["langue"] == "fr" and f.get("actif", True)}
+    assert len(generalistes) >= 12
+    assert {"Le Monde", "Le Figaro", "Libération", "Les Échos"} <= generalistes

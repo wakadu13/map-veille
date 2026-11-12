@@ -4,6 +4,7 @@ limite de taille, réessais et disjoncteur.
 Un petit serveur HTTP local joue les flux : aucun accès à Internet n'est nécessaire.
 """
 import gzip
+import json
 import os
 import sys
 import threading
@@ -247,14 +248,16 @@ def test_changer_l_adresse_oublie_l_etag(tmp_path, serveur):
     cx.close()
 
 
-def test_flux_inchange_ne_perd_pas_les_articles(tmp_path, serveur):
+def test_flux_inchange_ne_perd_pas_les_articles(tmp_path, serveur, monkeypatch):
     """Un 304 ne doit rien supprimer : les articles de la collecte précédente restent."""
+    # un fichier de flux à soi : base.ouvrir() recrée les sources déclarées qui manquent,
+    # et vider la table ne suffit donc plus à isoler le test
+    fichier = tmp_path / "flux.json"
+    fichier.write_text(json.dumps({"flux": [
+        {"nom": "Média", "type": "rss", "url": f"{serveur}/flux"}]}), encoding="utf-8")
+    monkeypatch.setattr(base, "FLUX_JSON", fichier)
     chemin = tmp_path / "map.sqlite"
     cx = base.ouvrir(chemin)
-    cx.execute("DELETE FROM sources")
-    base._inserer_source(cx, {"nom": "Média", "type": "rss",
-                              "url": f"{serveur}/flux", "actif": True})
-    cx.commit()
     cx.close()
     collect.main(["--base", str(chemin), "--migrer", str(tmp_path / "rien.json"), "--forcer"])
     cx = base.ouvrir(chemin)

@@ -187,7 +187,7 @@ départ, et 14 ne répondent pas du tout — celles-là sont coupées, avec le m
 
 | Thème | Sources actives |
 |---|---|
-| *(aucun — tri par mots-clés)* | Le Monde, France 24, RFI, franceinfo, The Conversation France, Ars Technica |
+| *(aucun — tri par mots-clés)* | Le Monde, France 24, RFI, franceinfo, The Conversation France, L'Humanité, Politis, Mediapart, Libération, Alternatives Économiques, Ouest-France, 20 Minutes, Les Échos, L'Express, L'Opinion, Le Figaro, Valeurs actuelles |
 | `def` Conflits et défense | Opex360 (Zone militaire), Forces Operations Blog, Defense News, Breaking Defense, Defense One, Naval News, The War Zone |
 | `geo` Géopolitique | Le Grand Continent, The National Interest, Le Rubicon, Revue Conflits, Diploweb, Institut Montaigne, Areion24.news, War on the Rocks, Atlantic Council, Lowy Institute – The Interpreter, Le Monde diplomatique, Orient XXI, Politique étrangère (Ifri), Foreign Affairs, Foreign Policy, The Diplomat, RUSI, CSIS, SWP Berlin, Responsible Statecraft |
 | `cyb` Cybersécurité et informatique | CERT-FR (ANSSI), LeMagIT, Le Monde Informatique, Next, ZATAZ, Krebs on Security, BleepingComputer, The Record, The Hacker News, Dark Reading, CISA – avis de sécurité, Schneier on Security |
@@ -351,11 +351,14 @@ partis pris :
   sur un sujet où se tromper n'est pas anodin ;
 - c'est **un jugement, pas une mesure**. Chaque entrée de `config/orientations.json` porte un
   champ `pourquoi` qui dit sur quoi elle repose, lisible au survol. Relisez-les, corrigez-les ;
-- **la plupart des sources sont « non classées », et c'est volontaire.** Six seulement sont
-  placées sur l'axe. Une agence de cybersécurité, une revue universitaire ou un institut
-  américain n'ont pas de position gauche-droite française — leur en inventer une serait pire
-  que de n'en donner aucune. Leur étiquette dit alors ce qu'elles sont : « Service public »,
-  « Presse spécialisée », « Institut étranger ».
+- **ce qui n'a pas de place sur l'axe n'en reçoit pas.** Dix-neuf sources y sont placées,
+  de L'Humanité (−80) à Valeurs actuelles (+80), à peu près autant de chaque côté — un test
+  vérifie cet équilibre. Les autres restent « non classées » : une agence de cybersécurité,
+  un média de service public tenu au pluralisme, une revue universitaire ou un institut
+  américain n'ont pas de position dans le clivage français, et leur en inventer une serait
+  pire que de n'en donner aucune. Leur étiquette dit alors ce qu'elles sont : « Service
+  public », « Presse spécialisée », « Institut étranger ». *Marianne* et *20 Minutes* sont
+  volontairement laissés de côté : l'un refuse le clivage, l'autre n'a pas de ligne marquée.
 
 `"actif": false` retire le repère du site sans rien effacer, et `admin.py config` liste les
 sources placées et celles qui manquent.

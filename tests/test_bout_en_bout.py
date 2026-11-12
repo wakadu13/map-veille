@@ -113,6 +113,10 @@ def collecte(site, tmp_path_factory):
     ]}, ensure_ascii=False), encoding="utf-8")
 
     chemin = dossier / "map.sqlite"
+    # La configuration de test reste en place pour TOUT le module : depuis que base.ouvrir()
+    # crée les flux déclarés qui manquent, rouvrir cette base avec le fichier du dépôt y
+    # ferait entrer les soixante-dix-sept sources réelles — et une collecte irait les
+    # interroger pour de bon.
     ancien = base.FLUX_JSON
     base.FLUX_JSON = flux
     try:
@@ -120,9 +124,9 @@ def collecte(site, tmp_path_factory):
         # --forcer : sans cela la fréquence de rafraîchissement sauterait les sources, et
         # on ne verrait pas si les en-têtes conditionnels font bien leur travail
         collect.main(["--base", str(chemin), "--migrer", str(dossier / "rien.json"), "--forcer"])
+        yield chemin
     finally:
         base.FLUX_JSON = ancien
-    return chemin
 
 
 @pytest.fixture(scope="module")

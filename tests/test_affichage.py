@@ -101,15 +101,27 @@ def test_chaque_entree_porte_une_etiquette_et_une_justification():
         assert len(s["pourquoi"]) > 20, f"{nom} : dire sur quoi repose le jugement"
 
 
-def test_la_plupart_des_sources_sont_non_classees():
-    """Un axe gauche-droite français ne s'applique ni à une agence de sécurité, ni à un
-    think tank américain. Leur en inventer une position serait pire que de n'en donner
-    aucune, et le fichier livré assume de laisser la colonne vide."""
+def test_ce_qui_n_a_pas_de_place_sur_l_axe_n_en_recoit_pas():
+    """Un axe gauche-droite français ne s'applique ni à une agence de cybersécurité, ni au
+    service public, ni à un think tank américain. Leur en inventer une position serait pire
+    que de n'en donner aucune."""
     sources = base.charger_orientations()["sources"]
-    placees = [n for n, s in sources.items() if s["position"] is not None]
-    assert 0 < len(placees) < len(sources) / 4
-    for nom in ("CERT-FR (ANSSI)", "Foreign Affairs", "franceinfo", "RUSI"):
+    for nom in ("CERT-FR (ANSSI)", "Foreign Affairs", "franceinfo", "RUSI", "RFI",
+                "Marianne", "20 Minutes", "Courrier international"):
         assert sources[nom]["position"] is None, nom
+
+
+def test_l_axe_est_renseigne_et_couvre_tout_le_spectre():
+    """Un repère qui ne classerait que quelques titres d'un seul bord ne vaudrait rien."""
+    positions = [s["position"] for s in base.charger_orientations()["sources"].values()
+                 if s["position"] is not None]
+    assert len(positions) >= 15
+    assert min(positions) <= -60 and max(positions) >= 60, "les deux extrémités sont tenues"
+    gauche = [p for p in positions if p < -10]
+    droite = [p for p in positions if p > 10]
+    assert gauche and droite
+    assert 0.4 <= len(gauche) / (len(gauche) + len(droite)) <= 0.6, \
+        f"répartition déséquilibrée : {len(gauche)} à gauche, {len(droite)} à droite"
 
 
 def ecrire_orientations(tmp_path, **champs):
