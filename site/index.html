@@ -17,6 +17,8 @@
   --bg:#eef1f4; --panel:#ffffff; --ink:#14213a; --muted:#5b6679; --line:#d5dbe3;
   --land:#dfe4ea; --amas2:#4f73b3; --amas3:#1f4690;
   --accent:#1f4690; --new:#c2410c; --newbg:#fff1e8; --sea:#f7f9fb;
+  /* axe gauche-droite : couleurs décoratives, le sens est porté par le texte à côté */
+  --gauche:#c0392b; --centre:#c9d1da; --droite:#2b5fa8;
   --display:"Saira Condensed","Arial Narrow",sans-serif;
   --body:"IBM Plex Sans",system-ui,sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,monospace;
@@ -24,11 +26,13 @@
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --bg:#0f1522; --panel:#161e2e; --ink:#e6ebf3; --muted:#9aa6ba; --line:#2a3447;
   --land:#232d40; --amas2:#4b78c4; --amas3:#86a8e6;
-  --accent:#86a8e6; --new:#fb9a5b; --newbg:#3a2316; --sea:#121a28; color-scheme:dark}}
+  --accent:#86a8e6; --new:#fb9a5b; --newbg:#3a2316; --sea:#121a28;
+  --gauche:#e06a5c; --centre:#3b4557; --droite:#6f9ae0; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0f1522; --panel:#161e2e; --ink:#e6ebf3; --muted:#9aa6ba; --line:#2a3447;
   --land:#232d40; --amas2:#4b78c4; --amas3:#86a8e6;
-  --accent:#86a8e6; --new:#fb9a5b; --newbg:#3a2316; --sea:#121a28; color-scheme:dark}
+  --accent:#86a8e6; --new:#fb9a5b; --newbg:#3a2316; --sea:#121a28;
+  --gauche:#e06a5c; --centre:#3b4557; --droite:#6f9ae0; color-scheme:dark}
 *{box-sizing:border-box}
 html,body{margin:0}
 [hidden]{display:none!important}
@@ -105,6 +109,16 @@ li:last-child{border-bottom:none}
 .badge{align-self:flex-start;font-family:var(--mono);font-size:.68rem;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--new);background:var(--newbg);padding:1px 6px;border-radius:3px}
 li h3{font-size:.98rem;font-weight:600;margin:0;line-height:1.35}
 .meta{font-family:var(--mono);font-size:.72rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:2px 10px;font-variant-numeric:tabular-nums}
+/* extrait : le chapô publié par le média lui-même, deux ou trois phrases */
+.extrait{margin:0;font-size:.86rem;line-height:1.5;color:var(--ink);opacity:.82;max-width:72ch}
+/* repère d'orientation éditoriale de la SOURCE. Le dégradé est décoratif : l'étiquette
+   écrite à côté porte seule le sens, pour qui ne distingue pas les couleurs. */
+.orient{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:.68rem;color:var(--muted)}
+.axe{position:relative;width:76px;height:5px;border-radius:3px;flex:0 0 auto;
+  background:linear-gradient(90deg,var(--gauche),var(--centre),var(--droite))}
+.axe b{position:absolute;top:-3px;width:3px;height:11px;border-radius:2px;
+  background:var(--ink);box-shadow:0 0 0 1px var(--panel);transform:translateX(-50%)}
+.orient .nc{opacity:.75}
 .meta a{color:var(--accent);display:inline-flex;align-items:center;min-height:24px;padding-block:3px;margin-block:-3px}
 .more{align-items:center}
 .empty code{font-family:var(--mono);font-size:.85em}
@@ -141,6 +155,9 @@ footer{font-size:.78rem;color:var(--muted);max-width:75ch}
     <button class="chip" data-jours="30" aria-pressed="true">30 jours</button>
     <span class="lbl" id="lbl-langue">Langue</span>
     <span id="langues"></span>
+    <span class="lbl" id="lbl-tri">Tri</span>
+    <button class="chip" data-tri="date" aria-pressed="true">Plus récents</button>
+    <button class="chip" data-tri="reprises" aria-pressed="false">Les plus repris</button>
   </div>
 
   <div class="bar" id="themes"><span class="lbl">Thèmes</span></div>
@@ -181,8 +198,10 @@ let THEMES=[], CARTE=null, fJours=30, limite=PAS, requete=0;
 let fThemes=[];            // thèmes cochés par le visiteur ; vide = tous
 let LANGUES=[], fLangue=null;   // langue choisie ; null = toutes
 let LANGUE_DEFAUT=null;         // langue d'ouverture, venue de config/site.json
+let ORIENTATIONS=null;          // repère éditorial par source ; null = désactivé
+let fTri="date";                // « reprises » fait remonter les sujets les plus cités
 let pageTheme=null;        // code du thème si on est sur /theme/<code>
-const CLE_THEMES="map.themes", CLE_LANGUE="map.langue";
+const CLE_THEMES="map.themes", CLE_LANGUE="map.langue", CLE_TRI="map.tri";
 let vue="points";          // points | zones | liste
 let carte=null;            // module site/carte.js, importé à la première vue « points »
 const $=s=>document.querySelector(s);
@@ -210,6 +229,7 @@ async function api(chemin, params={}){
 function construire(ref){
   THEMES=ref.themes; CARTE=ref.carte; LANGUES=ref.langues||[];
   LANGUE_DEFAUT=ref.langue_par_defaut||null;
+  ORIENTATIONS=ref.orientations||null;
   THEMES.forEach(t=>{
     const b=document.createElement("button");
     b.className="chip"; b.textContent=t.nom; b.dataset.t=t.code;
@@ -308,6 +328,14 @@ function marquerLangue(){
     b.setAttribute("aria-pressed", b.dataset.lg===fLangue));
 }
 
+function setTri(valeur){
+  fTri=valeur;
+  document.querySelectorAll("#vues .chip[data-tri]").forEach(b=>
+    b.setAttribute("aria-pressed", b.dataset.tri===valeur));
+  ecrireMemoire(CLE_TRI, valeur);
+  actualiser();
+}
+
 function setJours(j){
   fJours=j;
   document.querySelectorAll("#vues .chip[data-jours]").forEach(b=>b.setAttribute("aria-pressed",+b.dataset.jours===j));
@@ -337,6 +365,7 @@ document.addEventListener("click",e=>{
   if(e.target.dataset?.vue)setVue(e.target.dataset.vue);
   if(e.target.dataset?.jours)setJours(+e.target.dataset.jours);
   if(e.target.dataset?.lg)setLangue(e.target.dataset.lg===fLangue?null:e.target.dataset.lg);
+  if(e.target.dataset?.tri)setTri(e.target.dataset.tri);
   if(e.target.classList?.contains("lien-evenement"))ouvrirEvenement(+e.target.dataset.evt);
 });
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&!$("#panneau").hidden)fermerPanneau()});
@@ -375,13 +404,31 @@ function dessinerEnTete(syn){
   $("#srcs").textContent=syn.sources.join(", ")||"aucune";
 }
 
+// Repère d'orientation ÉDITORIALE de la source, jamais de l'article : une ligne de
+// journal est publique et stable, le penchant d'une dépêche prise isolément ne l'est pas.
+// Le dégradé est décoratif ; l'étiquette écrite à côté porte le sens.
+function orientation(source){
+  if(!ORIENTATIONS)return "";
+  const s=ORIENTATIONS.sources[source];
+  if(!s)return `<span class="orient"><span class="nc">Orientation non renseignée</span></span>`;
+  const quoi=s.pourquoi?` — ${s.pourquoi}`:"";
+  if(s.position==null)
+    return `<span class="orient" title="${esc(s.etiquette+quoi)}"><span class="nc">${esc(s.etiquette)}</span></span>`;
+  const pct=(s.position+100)/2;
+  return `<span class="orient" title="${esc(s.etiquette+quoi)}">`
+    + `<span class="axe" role="img" aria-label="Ligne éditoriale de ${esc(source)} : ${esc(s.etiquette)}">`
+    + `<b style="left:${pct}%"></b></span>${esc(s.etiquette)}</span>`;
+}
+
 const ligne=i=>`<li>
     ${i.nouveau?'<span class="badge">Nouveau</span>':""}
     <h3>${esc(i.titre)}</h3>
+    ${i.extrait?`<p class="extrait">${esc(i.extrait)}</p>`:""}
     <div class="meta"><span>${esc(i.source)}</span><span>${fmtH(i.date)}</span>${
       i.lieu?`<span>${esc(i.lieu)}</span>`:""}<span>${esc(tNom(i.theme))}</span>${
       i.nb_sources>1?`<button class="lien-evenement" data-evt="${i.evenement_id}">${i.nb_sources} sources</button>`:""
       }<a href="${esc(i.lien)}" target="_blank" rel="noopener">Lire l'article ↗</a></div>
+    ${orientation(i.source)}
   </li>`;
 let affiches=0, totalFil=0;
 function bouton(){const reste=totalFil-affiches;return reste>0?`<li class="more"><button class="chip" id="plus">Afficher ${Math.min(PAS,reste)} de plus (${reste} restantes)</button></li>`:""}
@@ -402,7 +449,7 @@ async function afficherPlus(){
   const b=$("#plus"); if(b){b.disabled=true;b.textContent="Chargement…"}
   try{
     const res=await api("articles",{themes:paramThemes(),langue:fLangue,jours:fJours,
-                                    limite:PAS,decalage:affiches});
+                                    tri:fTri,limite:PAS,decalage:affiches});
     affiches+=res.articles.length;
     $(".more")?.remove();
     $("#list").insertAdjacentHTML("beforeend",res.articles.map(ligne).join("")+bouton());
@@ -420,7 +467,7 @@ async function actualiser(){
   try{
     const [syn,res,rec]=await Promise.all([
       api("synthese",{themes:paramThemes(),langue:fLangue,jours:fJours}),
-      api("articles",{themes:paramThemes(),langue:fLangue,jours:fJours,limite:PAS}),
+      api("articles",{themes:paramThemes(),langue:fLangue,jours:fJours,tri:fTri,limite:PAS}),
       // le récapitulatif ne doit pas faire échouer la page s'il manque
       recapAbsent?null:api("recap",{themes:paramThemes()}).catch(()=>null)]);
     if(n!==requete)return;          // une requête plus récente a été lancée entre-temps
@@ -464,6 +511,7 @@ function replierSurInterrogation(){
   pageTheme = lirePageTheme();
   fThemes = lireMemoire(CLE_THEMES, []);
   fJours = lireMemoire("map.jours", 30);
+  fTri = ["date","reprises"].includes(lireMemoire(CLE_TRI,"date")) ? lireMemoire(CLE_TRI,"date") : "date";
   // « undefined » = le visiteur n'a jamais touché aux puces de langue. Une valeur
   // enregistrée, fût-elle null (« Toutes »), est un choix : elle l'emporte sur la
   // configuration, qui ne décide que de la première visite.
@@ -475,6 +523,7 @@ function replierSurInterrogation(){
   if(!LANGUES.some(l=>l.code===fLangue))fLangue=null;   // langue retirée de la configuration
   marquerLangue();
   document.querySelectorAll("#vues .chip[data-jours]").forEach(b=>b.setAttribute("aria-pressed",+b.dataset.jours===fJours));
+  document.querySelectorAll("#vues .chip[data-tri]").forEach(b=>b.setAttribute("aria-pressed",b.dataset.tri===fTri));
   await actualiser();
   setVue("points");
   suivreEnDirect();

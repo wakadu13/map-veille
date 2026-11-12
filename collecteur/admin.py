@@ -92,6 +92,24 @@ def cmd_config(cx, args):
     except ValueError as e:
         print(f"  ERREUR — {e}\n  Le site sert le réglage par défaut en attendant.")
 
+    print(f"\nOrientation éditoriale, d'après {base.ORIENTATIONS_JSON.relative_to(base.RACINE)} :")
+    try:
+        o = base.charger_orientations()
+        if not o["actif"]:
+            print("  Repère désactivé : rien ne s'affiche sous les articles.")
+        else:
+            placees = {n: s for n, s in o["sources"].items() if s["position"] is not None}
+            print(f"  {len(o['sources'])} sources renseignées, dont {len(placees)} "
+                  f"placées sur l'axe gauche-droite :")
+            for nom, s in sorted(placees.items(), key=lambda x: x[1]["position"]):
+                print(f"    {s['position']:>+5}  {nom[:34]:35}{s['etiquette']}")
+            manquantes = sorted({s["nom"] for s in base.lister_sources(cx)} - set(o["sources"]))
+            if manquantes:
+                print(f"  Sans orientation, elles s'afficheront « non renseignée » :"
+                      f"\n    {', '.join(manquantes)}")
+    except ValueError as e:
+        print(f"  ERREUR — {e}\n  Le site n'affiche aucun repère en attendant.")
+
     print(f"\nSources d'après {base.FLUX_JSON.relative_to(base.RACINE)} :")
     print(f"  {'nom':34}{'type':11}{'lg':4}{'fréq':>6}  {'thème':7}{'origine':9}actif")
     for s in base.lister_sources(cx):

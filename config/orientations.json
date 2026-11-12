@@ -1,0 +1,110 @@
+{
+  "_commentaire": "Repère d'orientation éditoriale, affiché sous chaque article. Il porte sur LA SOURCE, pas sur l'article : la ligne d'un journal est une chose publique, documentée et stable, alors que le penchant supposé d'une dépêche prise isolément n'est ni l'un ni l'autre. Faire juger chaque titre par un modèle de langage donnerait une étiquette différente à chaque collecte, sur un sujet où se tromper n'est pas anodin.\n\nC'est un jugement éditorial, pas un fait mesuré. Les positions ci-dessous sont celles que l'on trouve couramment décrites, et le champ « pourquoi » dit sur quoi chacune repose : relisez-les, corrigez-les, c'est votre projet. Mettre « actif » à false retire l'affichage du site sans rien effacer.\n\nposition : de -100 (gauche) à +100 (droite), sur l'axe politique français. null = NON CLASSÉE, et c'est le cas le plus fréquent — une agence de sécurité informatique, une revue universitaire ou un institut de recherche étranger n'ont pas de place sur cet axe, et leur en inventer une serait pire que de n'en donner aucune.\netiquette : ce qui s'affiche. Obligatoire, même sans position : « Service public », « Presse spécialisée »… dit quelque chose d'utile là où l'axe ne dit rien.\n\nUne source absente de cette liste s'affiche « non renseignée ». « uv run collecteur/admin.py config » liste celles qui manquent.",
+
+  "actif": true,
+
+  "axe": {
+    "nom": "Axe politique français",
+    "reperes": [
+      { "a": -100, "nom": "Gauche" },
+      { "a": 0, "nom": "Centre" },
+      { "a": 100, "nom": "Droite" }
+    ]
+  },
+
+  "sources": {
+    "Le Monde": {
+      "position": -20,
+      "etiquette": "Centre gauche",
+      "pourquoi": "Ligne social-démocrate et européenne, couramment décrite comme centre gauche. Quotidien de référence à diffusion large."
+    },
+    "Le Monde diplomatique": {
+      "position": -60,
+      "etiquette": "Gauche",
+      "pourquoi": "Mensuel de gauche assumé, critique du libéralisme économique et des politiques occidentales. Ligne revendiquée, pas déduite."
+    },
+    "Orient XXI": {
+      "position": -50,
+      "etiquette": "Gauche",
+      "pourquoi": "Publication critique des politiques occidentales au Proche-Orient, animée par d'anciens diplomates et journalistes de cette sensibilité."
+    },
+    "Revue Conflits": {
+      "position": 50,
+      "etiquette": "Droite conservatrice",
+      "pourquoi": "Revue de géopolitique d'orientation conservatrice revendiquée, attachée aux souverainetés nationales."
+    },
+    "Institut Montaigne": {
+      "position": 30,
+      "etiquette": "Libéral",
+      "pourquoi": "Think tank libéral financé par des entreprises, favorable aux réformes de marché. Orientation publique et revendiquée."
+    },
+    "Fondation Robert Schuman": {
+      "position": 20,
+      "etiquette": "Centre droit européiste",
+      "pourquoi": "Fondation d'inspiration démocrate-chrétienne, proche de la famille politique du Parti populaire européen."
+    },
+
+    "France 24": { "position": null, "etiquette": "Service public", "pourquoi": "Audiovisuel extérieur de la France, tenu à une obligation de pluralisme." },
+    "RFI": { "position": null, "etiquette": "Service public", "pourquoi": "Audiovisuel extérieur de la France, tenu à une obligation de pluralisme." },
+    "franceinfo": { "position": null, "etiquette": "Service public", "pourquoi": "Audiovisuel public français, tenu à une obligation de pluralisme." },
+    "Courrier international": { "position": null, "etiquette": "Revue de presse", "pourquoi": "Traduit la presse étrangère sans ligne propre : l'orientation est celle des journaux repris." },
+    "The Conversation France": { "position": null, "etiquette": "Universitaire", "pourquoi": "Articles signés par des chercheurs, sous leur seule responsabilité." },
+
+    "IFRI": { "position": null, "etiquette": "Institut de recherche", "pourquoi": "Institut de relations internationales, pluraliste par vocation." },
+    "IRSEM": { "position": null, "etiquette": "Institutionnel", "pourquoi": "Institut de recherche rattaché au ministère des Armées." },
+    "Politique étrangère (Ifri)": { "position": null, "etiquette": "Revue académique", "pourquoi": "Revue à comité de lecture de l'Ifri." },
+    "Le Grand Continent": { "position": null, "etiquette": "Revue universitaire", "pourquoi": "Revue européiste issue de l'École normale supérieure, sans ligne partisane déclarée." },
+    "Le Rubicon": { "position": null, "etiquette": "Revue académique", "pourquoi": "Revue de chercheurs en études de sécurité." },
+    "Diploweb": { "position": null, "etiquette": "Revue académique", "pourquoi": "Revue de géopolitique universitaire." },
+    "Géoconfluences (ENS Lyon)": { "position": null, "etiquette": "Universitaire", "pourquoi": "Ressource pédagogique de l'ENS de Lyon pour l'enseignement de la géographie." },
+    "Areion24.news": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Groupe de presse de défense et de géopolitique." },
+    "Revue Défense Nationale": { "position": null, "etiquette": "Revue académique", "pourquoi": "Revue de réflexion sur les questions de défense." },
+
+    "Opex360 (Zone militaire)": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Suivi documentaire des opérations et des programmes d'armement." },
+    "Forces Operations Blog": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Industrie de défense et forces armées." },
+    "Meta-Defense": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Analyse des équilibres militaires." },
+    "Mer et Marine": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Marine militaire et marchande." },
+    "East Pendulum": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Suivi documenté de l'appareil militaire chinois." },
+    "Ministère des Armées": { "position": null, "etiquette": "Institutionnel", "pourquoi": "Communication officielle des armées françaises." },
+    "OTAN – actualités": { "position": null, "etiquette": "Institutionnel", "pourquoi": "Communiqués officiels de l'Alliance atlantique." },
+
+    "CERT-FR (ANSSI)": { "position": null, "etiquette": "Autorité publique", "pourquoi": "Avis techniques du CERT gouvernemental français." },
+    "ANSSI": { "position": null, "etiquette": "Autorité publique", "pourquoi": "Agence nationale de la sécurité des systèmes d'information." },
+    "CISA – avis de sécurité": { "position": null, "etiquette": "Autorité publique", "pourquoi": "Agence américaine de cybersécurité." },
+    "LeMagIT": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Presse informatique professionnelle." },
+    "Le Monde Informatique": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Presse informatique professionnelle." },
+    "Next": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Numérique et libertés ; ligne attachée au logiciel libre, sans positionnement partisan." },
+    "ZATAZ": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Veille sur la cybercriminalité." },
+    "Ars Technica": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Presse technologique américaine." },
+
+    "_etranger": "Les sources anglophones ci-dessous sont laissées NON CLASSÉES à dessein : l'axe gauche-droite français ne transpose pas à un think tank américain ou australien, dont les clivages (interventionnisme, libre-échange, atlantisme) ne s'alignent pas sur le nôtre. Leur étiquette dit ce qu'elles sont, pas où elles se situeraient chez nous.",
+
+    "The National Interest": { "position": null, "etiquette": "Revue étrangère", "pourquoi": "Revue américaine de politique étrangère, d'inspiration réaliste. Axe français inapplicable." },
+    "War on the Rocks": { "position": null, "etiquette": "Revue étrangère", "pourquoi": "Revue américaine d'études de sécurité. Axe français inapplicable." },
+    "ECFR": { "position": null, "etiquette": "Institut étranger", "pourquoi": "Think tank européen de politique étrangère. Axe français inapplicable." },
+    "Carnegie Endowment": { "position": null, "etiquette": "Institut étranger", "pourquoi": "Think tank américain. Axe français inapplicable." },
+    "Atlantic Council": { "position": null, "etiquette": "Institut étranger", "pourquoi": "Think tank américain d'orientation atlantiste. Axe français inapplicable." },
+    "Lowy Institute – The Interpreter": { "position": null, "etiquette": "Institut étranger", "pourquoi": "Think tank australien. Axe français inapplicable." },
+    "Foreign Affairs": { "position": null, "etiquette": "Revue étrangère", "pourquoi": "Revue du Council on Foreign Relations. Axe français inapplicable." },
+    "Foreign Policy": { "position": null, "etiquette": "Revue étrangère", "pourquoi": "Magazine américain d'affaires mondiales. Axe français inapplicable." },
+    "The Diplomat": { "position": null, "etiquette": "Revue étrangère", "pourquoi": "Revue sur l'Asie-Pacifique. Axe français inapplicable." },
+    "Chatham House": { "position": null, "etiquette": "Institut étranger", "pourquoi": "Think tank britannique. Axe français inapplicable." },
+    "RUSI": { "position": null, "etiquette": "Institut étranger", "pourquoi": "Institut britannique de défense et de sécurité. Axe français inapplicable." },
+    "CSIS": { "position": null, "etiquette": "Institut étranger", "pourquoi": "Think tank américain. Axe français inapplicable." },
+    "SWP Berlin": { "position": null, "etiquette": "Institut étranger", "pourquoi": "Institut allemand de politique internationale. Axe français inapplicable." },
+    "Responsible Statecraft": { "position": null, "etiquette": "Revue étrangère", "pourquoi": "Publication du Quincy Institute, critique de l'interventionnisme américain, transpartisane. Axe français inapplicable." },
+    "Defense News": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Presse de défense américaine." },
+    "Breaking Defense": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Presse de défense américaine." },
+    "Defense One": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Presse de défense américaine." },
+    "Naval News": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Presse navale internationale." },
+    "The War Zone": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Analyse technique des matériels militaires." },
+    "Krebs on Security": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Enquêtes sur la cybercriminalité." },
+    "BleepingComputer": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Incidents et correctifs de sécurité." },
+    "The Record": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Cybersécurité et cyberconflit." },
+    "The Hacker News": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Vulnérabilités et campagnes d'attaque." },
+    "Dark Reading": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Sécurité des systèmes d'information." },
+    "Schneier on Security": { "position": null, "etiquette": "Presse spécialisée", "pourquoi": "Analyses de Bruce Schneier sur la sécurité et la cryptographie." },
+    "GDACS (ONU / Commission européenne)": { "position": null, "etiquette": "Institutionnel", "pourquoi": "Alertes catastrophes de l'ONU et de la Commission européenne." },
+    "ReliefWeb (OCHA)": { "position": null, "etiquette": "Institutionnel", "pourquoi": "Rapports humanitaires du bureau de coordination de l'ONU." }
+  }
+}

@@ -243,3 +243,35 @@ def test_un_evenement_sans_source_publiable_est_invisible(client, tmp_path):
     cx.close()
     assert all(e["id"] != lagos["id"] for e in client.get("/api/evenements").json()["evenements"])
     assert client.get(f"/api/evenements/{lagos['id']}").status_code == 404
+
+
+# ---------- bruit de titre ----------
+def test_une_date_dans_le_titre_ne_rapproche_pas_deux_sujets():
+    """Les avis du CERT-FR s'intitulent tous « … dans X (26 octobre 2026) » : le mois et
+    l'année y pesaient autant que le produit, et suffisaient à fusionner des avis sans
+    rapport."""
+    a = base.jetons_titre(collect.normaliser(
+        "Multiples vulnérabilités dans les produits Tenable (26 octobre 2026)"))
+    b = base.jetons_titre(collect.normaliser(
+        "Multiples vulnérabilités dans Metabase (28 octobre 2026)"))
+    assert "octobre" not in a and "2026" not in a
+    assert base.similarite(a, b) < base.SEUIL_SIMILARITE
+
+
+def test_les_mots_porteurs_restent():
+    mots = base.jetons_titre(collect.normaliser(
+        "Collision de trains en Espagne le 28 octobre 2026"))
+    assert {"collision", "trains", "espagne"} <= mots
+
+
+def test_nb_sources_compte_des_medias_pas_des_articles(cx, gaz, ref):
+    """Deux avis du même émetteur ne se corroborent pas : sans DISTINCT, un paquet d'avis
+    du CERT-FR remontait en tête des « sujets les plus repris »."""
+    titre = "Inondations meurtrières à Nairobi"
+    for i in range(3):
+        ajouter(cx, gaz, ref, titre, source="CERT-FR", lien=f"https://cert.test/{i}")
+    evts = cx.execute("SELECT id, nb_sources FROM evenements").fetchall()
+    assert len(evts) == 1, "trois titres identiques font bien un seul événement"
+    assert evts[0]["nb_sources"] == 1, "mais une seule source"
+    ajouter(cx, gaz, ref, titre, source="Le Monde", lien="https://lm.test/1")
+    assert cx.execute("SELECT nb_sources FROM evenements").fetchone()[0] == 2

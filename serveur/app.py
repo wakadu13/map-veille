@@ -190,8 +190,9 @@ def referentiel(requete: Request, cx: sqlite3.Connection = Depends(connexion)):
     global _referentiel, _carte_datee
     # ce qui décide du contenu de cette route ; connexion() a déjà relu les thèmes si
     # besoin, il reste à savoir si ce qui est en cache date d'avant
+    dates = lambda c: c.stat().st_mtime_ns if c.exists() else None   # noqa: E731
     datee = (base.CARTE_JSON.stat().st_mtime_ns, tuple(base.THEMES_ACTIFS),
-             base.SITE_JSON.stat().st_mtime_ns if base.SITE_JSON.exists() else None)
+             dates(base.SITE_JSON), dates(base.ORIENTATIONS_JSON))
     if _referentiel is None or datee != _carte_datee:   # fichier modifié : on reconstruit
         _carte_datee = datee
         zones = [{"code": r["code"], "nom": r["nom"]}
@@ -209,10 +210,15 @@ def referentiel(requete: Request, cx: sqlite3.Connection = Depends(connexion)):
             # un réglage d'affichage mal écrit ne doit pas rendre le site inaccessible :
             # on sert le comportement par défaut, et « admin.py config » montre l'erreur
             site_conf = dict(base.REGLAGES_SITE)
+        try:
+            orientations = base.charger_orientations()
+        except ValueError:
+            orientations = {"actif": False, "axe": {}, "sources": {}}
         corps, etag = serialiser({
             "zones": zones, "themes": themes,
             "langues": [{"code": c, "nom": base.NOMS_LANGUES.get(c, c)} for c in base.LANGUES],
             "langue_par_defaut": site_conf["langue_par_defaut"],
+            "orientations": orientations if orientations["actif"] else None,
             "duree_nouveau_heures": int(base.DUREE_NOUVEAU.total_seconds() // 3600),
             "carte": {k: v for k, v in carte_conf.items() if not k.startswith("_")}})
         _referentiel = (corps, gzip.compress(corps, 6), etag)
@@ -271,6 +277,8 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
              jours: int = Query(30, ge=1, le=365),
              limite: int = Query(150, ge=1, le=500), decalage: int = Query(0, ge=0),
              grouper: bool = Query(True, description="une ligne par événement plutôt que par article"),
+             tri: str = Query("date", pattern="^(date|reprises)$",
+                              description="« reprises » fait remonter les sujets cités par le plus de sources"),
              cx: sqlite3.Connection = Depends(connexion)):
     """Le fil, du plus récent au plus ancien.
 
@@ -291,8 +299,8 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
             f"SELECT COUNT(*), COALESCE(SUM(ajout >= ?), 0) FROM fil WHERE {where}",
             [seuil_nouveau, *params]).fetchone()
         lignes = cx.execute(
-            f"""SELECT id, titre, source, date_pub AS date, zone, theme, lien, evenement_id,
-                       ajout >= ? AS nouveau
+            f"""SELECT id, titre, extrait, source, date_pub AS date, zone, theme, lien,
+                       evenement_id, ajout >= ? AS nouveau
                 FROM fil WHERE {where} ORDER BY date_pub DESC LIMIT ? OFFSET ?""",
             [seuil_nouveau, *params, limite, decalage]).fetchall()
         return avec_cache({"total": total, "nouveaux": nouveaux, "decalage": decalage,
@@ -321,10 +329,16 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
         f"""SELECT COUNT(*), COALESCE(SUM(e.maj >= ?), 0), COALESCE(SUM(e.nb_sources), 0)
             FROM evenements e WHERE {ou_evt}""", [seuil_nouveau, *p_evt]).fetchone()
 
+    # « reprises » : les sujets que le plus de sources ont relayés, la date départageant.
+    # C'est la question « de quoi parle-t-on le plus ? », que l'ordre chronologique noie —
+    # un sujet repris par huit médias s'y trouve dispersé en huit lignes d'heures diverses.
+    # L'index idx_evenements_fil porte déjà nb_sources, le tri ne coûte donc rien de plus.
+    ordre = ("e.nb_sources DESC, e.date_fin DESC" if tri == "reprises"
+             else "e.date_fin DESC")
     evts = cx.execute(
         f"""SELECT e.id, e.lieu, e.lat, e.lon, e.zone, e.theme, e.nb_sources
             FROM evenements e WHERE {ou_evt}
-            ORDER BY e.date_fin DESC LIMIT ? OFFSET ?""",
+            ORDER BY {ordre} LIMIT ? OFFSET ?""",
         [*p_evt, limite, decalage]).fetchall()
 
     representants = {}
@@ -336,8 +350,10 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
         # la fenêtre glissante ne porte que sur les articles de ces événements-là,
         # quelques centaines de lignes, et non sur toute la table
         for r in cx.execute(
-                f"""SELECT evenement_id, id, titre, source, date_pub AS date, lien, nouveau FROM (
-                      SELECT evenement_id, id, titre, source, date_pub, lien, ajout >= ? AS nouveau,
+                f"""SELECT evenement_id, id, titre, extrait, source, date_pub AS date, lien,
+                           nouveau FROM (
+                      SELECT evenement_id, id, titre, extrait, source, date_pub, lien,
+                             ajout >= ? AS nouveau,
                              ROW_NUMBER() OVER (PARTITION BY evenement_id
                                                 ORDER BY date_pub DESC) rn
                       FROM fil WHERE evenement_id IN ({trous}){ou_art}) WHERE rn = 1""",
@@ -349,13 +365,14 @@ def articles(requete: Request, zone: Optional[str] = None, theme: Optional[str] 
         r = representants.get(e["id"])
         if r is None:
             continue
-        sortie.append({"id": r["id"], "titre": r["titre"], "source": r["source"],
+        sortie.append({"id": r["id"], "titre": r["titre"], "extrait": r["extrait"],
+                       "source": r["source"],
                        "date": r["date"], "lien": r["lien"], "nouveau": bool(r["nouveau"]),
                        "evenement_id": e["id"], "nb_sources": e["nb_sources"],
                        "lieu": e["lieu"], "lat": e["lat"], "lon": e["lon"],
                        "zone": e["zone"], "theme": e["theme"]})
     return avec_cache({"total": total_evt, "nouveaux": nouveaux_evt,
-                       "total_articles": total_articles,
+                       "total_articles": total_articles, "tri": tri,
                        "decalage": decalage, "groupe": True, "articles": sortie},
                       CACHE_FIL, requete)
 
@@ -421,7 +438,7 @@ def evenement(evenement_id: int, requete: Request, cx: sqlite3.Connection = Depe
         raise HTTPException(404, f"Aucun événement n° {evenement_id}.")
     seuil_nouveau = (maintenant() - base.DUREE_NOUVEAU).isoformat()
     sources = [dict(r, nouveau=bool(r["nouveau"])) for r in cx.execute(
-        """SELECT id, titre, source, date_pub AS date, lien, ajout >= ? AS nouveau
+        """SELECT id, titre, extrait, source, date_pub AS date, lien, ajout >= ? AS nouveau
            FROM fil WHERE evenement_id = ? ORDER BY date_pub DESC""",
         (seuil_nouveau, evenement_id))]
     if not sources:
